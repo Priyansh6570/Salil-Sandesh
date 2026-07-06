@@ -1,103 +1,83 @@
-# HANDOFF — Phase 3: Public read API
+# HANDOFF — Phase 4: Public website (`apps/web`)
 
 ## What I built
 
-- **Site config**: `GET /site` serves the static brand config (`config/site.ts`, typed as shared `SiteConfig`) — no per-tenant anything.
-- **Taxonomy**: `GET /categories` (ordered) and `GET /tags`, serialized to the shared `Category`/`Tag` wire types.
-- **Articles** (all public routes serve only `status: "published"`):
-  - `GET /articles` — paginated body-free cards, `?lang=` selects the translation with centralised fallback to `defaultLanguage`, optional `?featured=true` / `?breaking=true` filters (consumed by the Phase 4 home page).
-  - `GET /articles/search?q=` — Mongo text index across every language's `title`/`excerpt`, body-free cards.
-  - `GET /articles/by-category/:slug`, `/by-tag/:slug`, `/by-author/:slug` — slug resolved to the ref first (404 on unknown), then the same paginated card pipeline.
-  - `GET /articles/:slug?lang=` — detail with TipTap body + tags; the slug matches ANY language's slug (an English slug finds the article and still serves the requested/default language).
-  - `GET /authors/:slug` — public author profile (`AuthorPublic`: name, slug, bio, avatar). Never exposes phone, roles, or status.
-- **Language fallback centralised** in `utils/language.ts` (`resolveTranslation`): requested language if present, else `defaultLanguage`; also reports `availableLanguages` on every card/detail for the Phase 4 language switcher.
-- **Batch resolution, no N+1** (`services/article-read.service.ts`): one `$in` query each for categories, authors, and cover media per page of cards; author avatars and covers rebuilt from `key` + `MEDIA_PUBLIC_BASE_URL` (`utils/media-url.ts`), never a stored URL.
-- **Indexes** on the article schema: `{status, publishedAt}` (+ category/author/tag variants), sparse per-language slug indexes, and one combined text index over all languages' title/excerpt.
-- **Query hygiene**: every query/param parsed with zod (`utils/query-schemas.ts`) — `lang` enum-bound, `page`/`limit` bounded (max 50), `q` length-capped, object-shaped query injection rejected with 400 before any Mongo query.
-- `scripts/dev-seed.ts`: idempotent dev fixtures (2 categories, 2 tags, 1 author with editor role, 1 cover media doc, 2 published Hindi articles — one featured with a full English translation, one breaking Hindi-only — and 1 draft that must never appear publicly). Phase 9 replaces this with the real NewsData-driven seed.
-- Shared types added: `SiteConfig`, `CategoryRef`, `TagRef`, `AuthorRef`, `AuthorPublic`, `MediaRef`, `ArticleCard`, `ArticleDetail`, `Paginated<T>`.
+- **Shell** (`app/layout.tsx`): masthead with the brand from `GET /site` (nothing hardcoded), category nav from `GET /categories`, search form, footer with static-page links. App renders dynamically (`force-dynamic`) with per-fetch `revalidate` caching, so builds never require a running API.
+- **Typed API client** (`lib/api.ts`): every call returns shared types (`SiteConfig`, `Category`, `Tag`, `Paginated<ArticleCard>`, `ArticleDetail`, `AuthorPublic`); 404s map to `null` → `notFound()`.
+- **Home** (`app/page.tsx`): featured (`?featured=true`), latest, and per-category sections, all honouring `?lang=`.
+- **Article page** (`app/article/[slug]`): typed TipTap renderer + **language switcher** listing `availableLanguages` (current highlighted, links via `?lang=`), cover via `next/image`, byline/date (locale-aware `Intl` formatting), tag links, metadata from the translation.
+- **Typed renderer** (`components/article-body.tsx`): recursive walker over `TipTapNode`. Node and mark renderers are `Record<AllowedNode, …>` / `Record<AllowedMark, …>` built from `@salil-sandesh/editor-config`, so **renderer↔editor-config parity is enforced at typecheck** (removing a renderer is a compile error — proven below). Unknown node/mark → visible "असमर्थित सामग्री" chip, never a silent drop. No `dangerouslySetInnerHTML` anywhere. Link marks render only after protocol sanitization (http/https, else plain text).
+- **Section / author / tag / search pages** with pagination (prev/next preserving `lang`/`q`), graceful empty states; search is server-rendered from `?q=` (uncached), form GET keeps URLs shareable.
+- **Static pages**: about, contact, privacy, terms (Hindi), plus a Hindi `not-found` page.
+- **Images**: `next/image` `remotePatterns` built in `next.config.mjs` from `MEDIA_PUBLIC_BASE_URL` (loaded from the root `.env`) — protocol + exact hostname + path prefix, **no wildcard host**; empty allowlist if the var is absent (fail closed).
+- **i18n** (`lib/i18n.ts`): UI dictionary with `hi` default and `en`, `getDictionary` falls back to Hindi for any other code; `languageNames` in native script for the switcher; `parseLang` validates `?lang=` against shared `languageCodes`.
+- shadcn/ui primitives (button, card, badge, input, separator) hand-written to the new-york style under `components/ui/` (CLI generation avoided to keep the no-comments rule); all styling through the shadcn token layer.
 
 ## Decisions & deviations
 
-- `MEDIA_PUBLIC_BASE_URL` is now a required env var (URL-validated) since cover URLs are built from it; the API fails at boot without it.
-- Detail lookup matches the slug across all languages via `$or` over the per-language sparse indexes; per-language slug uniqueness is still a Phase 6 write-path concern.
-- `?featured=`/`?breaking=` filters added to the list endpoint because Phase 4's home page consumes them — noted to keep the scope ledger honest.
-- Seed media keys (e.g. `seed/cover-monsoon.webp`) don't exist in R2 yet; URLs are structurally correct and Phase 7/9 put real objects behind them.
+- **TanStack Query deferred**: with search server-rendered there is zero client-side data fetching in the public site, so adding the QueryClient would be dead weight (and cross-origin fetches to the API would additionally need CORS). It enters with the admin app where real client mutations exist. Deviation from the stack line in CLAUDE.md §3, declared here deliberately.
+- `force-dynamic` on the root layout: a news site's pages should not be frozen at build time; per-fetch `revalidate` (60s articles, 300s config/taxonomy) provides the caching layer instead.
+- `API_URL` (server-side, non-secret) defaults to `http://localhost:4000`; set it in the deploy environment.
 
 ## Verification (real output)
 
-`pnpm -w typecheck`: `5 successful, 5 total` · `pnpm -w build`: `3 successful, 3 total, Time: 15.291s`.
+`pnpm -w typecheck`: `5 successful` · `pnpm -w build`: `3 successful` (web build no longer touches the API).
 
-Seed (`tsx src/scripts/dev-seed.ts`):
-
-```
-dev-seed connected to salil_sandesh
-{"author":"sandeep-sharma","categories":["rashtriya","khel"],"tags":["chunav","cricket"],"cover":"seed/cover-monsoon.webp","published":[{"id":"6a4b9f4005f4694c0bacec82","languages":["hi","en"]},{"id":"6a4b9f4005f4694c0bacec83","languages":["hi"]}],"draft":{"id":"6a4b9f4005f4694c0bacec84","status":"draft"}}
-```
-
-Live reads against Atlas:
+Real pages served by `next start` against the live API + Atlas seed:
 
 ```
-SITE: {"name":"सलिल संदेश","nameLatin":"Salil Sandesh","tagline":"आपका विश्वसनीय समाचार स्रोत","defaultLanguage":"hi","languages":["hi","en","bn","gu","mr","pa","ta","te","ur"]}
-CATEGORIES: rashtriya,khel
-TAGS: cricket,chunav
-LIST: total=2 items=2
-  card: [hi] भारत ने रोमांचक मुकाबले में सीरीज़ जीती | slug=bharat-series-jeet | author=संदीप शर्मा | cat=khel | cover=none | body-free=True
-  card: [hi] मानसून सत्र में जल नीति पर बड़ा फैसला | slug=monsoon-satra-jal-niti | author=संदीप शर्मा | cat=rashtriya | cover=https://pub-aa65b5478f16452289b7209ad7e2c7f6.r2.dev/seed/cover-monsoon.webp | body-free=True
+home -> 200 (30284 bytes)
+article-hi -> 200 (20258 bytes)
+article-en -> 200 (20079 bytes)
+section -> 200 (13388 bytes)
+author -> 200 (18787 bytes)
+tag -> 200 (15325 bytes)
+search -> 200 (17529 bytes)
+about -> 200 (11097 bytes)
+unknown-article -> 404
 ```
 
-Language selection and fallback (`?lang=en`):
+Content assertions on the served HTML:
 
 ```
-lang=en card: [hi] भारत ने रोमांचक मुकाबले में सीरीज़ जीती | available=hi
-lang=en card: [en] Major water policy decision expected in monsoon session | available=hi+en
+hi page has Hindi title: True
+hi page has switcher link to en: True
+hi page renders heading node: True
+hi page renders blockquote: True
+hi page renders list item: True
+en page has English title: True
+en page has English body: True
+en page switcher marks hi available: True
+hi page uses next/image for cover: True
+home has featured section: True
+home has latest section: True
+home has breaking badge: True
+home shows cricket article: True
+home nav has categories: True
+search shows result: True
+empty search graceful: True
+tag page shows tagged article: True
 ```
 
-Detail, cross-language slugs, drafts, 404s:
+Renderer↔editor-config parity proof (removed the `hardBreak` renderer, then reverted):
 
 ```
-detail hi-slug: [hi] मानसून सत्र में जल नीति पर बड़ा फैसला | body.type=doc nodes=5 | tags=chunav
-detail ?lang=en: [en] Major water policy decision expected in monsoon session
-detail by EN slug: [hi] मानसून सत्र में जल नीति पर बड़ा फैसला
-untranslated ?lang=en falls back: [hi] भारत ने रोमांचक मुकाबले में सीरीज़ जीती
-draft slug -> 404
-unknown slug -> 404
+components/article-body.tsx(84,7): error TS2741: Property 'hardBreak' is missing in type '{ doc: ...; }' but required in type 'Record<"blockquote" | "text" | "doc" | "paragraph" | "heading" | "bulletList" | "orderedList" | "listItem" | "horizontalRule" | "hardBreak", ...>'.
 ```
 
-Filtered lists, search (Hindi and English), author profile, input guards:
-
-```
-by-category khel: total=1 first=भारत ने रोमांचक मुकाबले में सीरीज़ जीती
-by-tag chunav: total=1 first=मानसून सत्र में जल नीति पर बड़ा फैसला
-by-author: total=2
-featured filter: total=1 first=monsoon-satra-jal-niti
-search 'जल': total=1 first=monsoon-satra-jal-niti
-search 'water' lang=en: total=1 first=[en] Major water policy decision expected in monsoon session
-author profile: {"id":"6a4b9f4005f4694c0bacec7c","name":"संदीप शर्मा","slug":"sandeep-sharma","bio":"वरिष्ठ संवाददाता, दो दशक का पत्रकारिता अनुभव"}
-author has phone field: False
-unknown category -> 404
-bad page param -> 400
-```
-
-Types-live proof (set `isBreaking: "yes"` in the card assembler, then reverted):
-
-```
-src/services/article-read.service.ts(84,5): error TS2322: Type 'string' is not assignable to type 'boolean'.
-```
-
-Secret hygiene: `git ls-files` filtered for `.env` → `.env.example` only.
+Safety greps: `dangerouslySetInnerHTML|localStorage|sessionStorage` across `apps/web` → no matches. `git ls-files` filtered for `.env` → `.env.example` only.
 
 ## Watch-outs
 
-- Search uses Mongo's text index (language-agnostic tokenizer); Hindi stemming is basic. Good enough for now; revisit if search quality matters later.
-- The cover URL host (`pub-…r2.dev`) is the controlled origin from env — Phase 4's `next/image` `remotePatterns` must allowlist exactly this host and nothing else.
-- Author pages expose any active staff user by exact slug (name/slug/bio/avatar only). If authors-without-articles should 404, tighten in Phase 4/8.
+- The seed's cover key has no real object in R2 yet, so the cover image request 404s at the media origin (the page and `next/image` markup are correct; Phase 7/9 put real objects behind the keys).
+- Home fetches per-category sections for the first 4 categories (2 exist today); with many categories revisit the fan-out.
+- UI dictionary covers `hi`/`en`; other languages fall back to Hindi UI copy while article content still renders in the requested language.
 
 ## Reviews
 
-- build-reviewer: PASS — deliverables, wiring, route ordering, no-N+1 batch resolution, index set, zod bindings, seed idempotency, and HANDOFF authenticity (sort orders, node counts, and types-live line/col cross-checked against source) all verified; no defects. Noted (non-blocking): search accepts-but-ignores `featured`/`breaking`; card assembly falls back to empty refs if a lookup misses.
-- security-reviewer: issues-fixed — secrets, draft isolation on every route, field-explicit serialization (no phone/roles/status leaks), zod-gated query injection, media-URL-from-key-only all clean. One-line low fix applied: the `status: "published"` gate now spreads AFTER caller filters so it can never be overridden. Deferred with scope notes: per-IP rate limit on public search (pre-launch), authors-without-articles exposure (Phase 8), custom media domain to replace `*.r2.dev` (pre-launch).
+- build-reviewer: PASS — deliverables wired end to end (client paths cross-checked against actual API routes), renderer parity proof reproduced independently in a scratch compile, no comments, no dead TanStack dependency behind the declared deferral, content assertions consistent with dictionary and seed sources.
+- security-reviewer: issues-fixed — XSS surfaces clean (React text nodes only, `safeHref` rejects `javascript:`/`data:`, heading tag clamped to h1–h6), image allowlist exact-host and fail-closed, no token storage, all user input into the API client encoded/validated. Two low/info items applied: baseline security headers (nosniff, referrer-policy, frame deny, permissions-policy) added to `next.config.mjs`, and `parsePage` hoisted into `lib/i18n.ts` to remove four duplicated copies. Deferred with note: full CSP at the deployment phase.
 
 ## Next step
 
-Phase 4 — public website (`apps/web`): shell, home (featured/latest/by-section), article page with typed TipTap renderer + language switcher, section/author/tag/search pages, static pages, `next/image` allowlist, hi-default i18n dictionary.
+Phase 5 — admin CMS foundation (`apps/admin`): BFF session (httpOnly AES-GCM cookie, server-side refresh rotation via route handlers), phone-OTP login, permission-gated shell/nav, finalize `packages/editor-config`.
