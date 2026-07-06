@@ -60,7 +60,7 @@ articleSchema.index({ status: 1, authorId: 1, publishedAt: -1 });
 articleSchema.index({ status: 1, tagIds: 1, publishedAt: -1 });
 
 for (const code of languageCodes) {
-  articleSchema.index({ [`translations.${code}.slug`]: 1 }, { sparse: true });
+  articleSchema.index({ [`translations.${code}.slug`]: 1 }, { unique: true, sparse: true });
 }
 
 articleSchema.index(

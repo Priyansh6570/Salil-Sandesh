@@ -12,6 +12,9 @@
   "scripts": {
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "@salil-sandesh/shared": "workspace:*"
+  },
   "devDependencies": {
     "typescript": "^5.5.4"
   }

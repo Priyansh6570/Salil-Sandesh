@@ -42,6 +42,24 @@ async function main(): Promise<void> {
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
 
+  const writerRole = await RoleModel.findOneAndUpdate(
+    { name: "writer" },
+    { permissions: ["article:create", "article:edit"], systemLocked: false },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
+
+  const writer = await UserModel.findOneAndUpdate(
+    { slug: "kavita-verma" },
+    {
+      $setOnInsert: { phone: "+919999000003" },
+      name: "कविता वर्मा",
+      bio: "उभरती हुई लेखिका",
+      roleIds: [writerRole._id],
+      status: "active",
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
+
   const author = await UserModel.findOneAndUpdate(
     { slug: "sandeep-sharma" },
     {
@@ -191,6 +209,7 @@ async function main(): Promise<void> {
   console.log(
     JSON.stringify({
       author: author.slug,
+      writer: writer.slug,
       categories: [national.slug, sports.slug],
       tags: [electionTag.slug, cricketTag.slug],
       cover: cover.key,

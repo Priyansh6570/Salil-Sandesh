@@ -57,3 +57,36 @@
     @apply bg-background text-foreground;
   }
 }
+
+@layer components {
+  .tiptap-editor {
+    @apply min-h-48 text-sm leading-6 outline-none;
+  }
+  .tiptap-editor p {
+    @apply my-2;
+  }
+  .tiptap-editor h2 {
+    @apply mt-4 text-xl font-semibold;
+  }
+  .tiptap-editor h3 {
+    @apply mt-3 text-lg font-semibold;
+  }
+  .tiptap-editor h4 {
+    @apply mt-2 text-base font-semibold;
+  }
+  .tiptap-editor ul {
+    @apply my-2 ml-6 list-disc;
+  }
+  .tiptap-editor ol {
+    @apply my-2 ml-6 list-decimal;
+  }
+  .tiptap-editor blockquote {
+    @apply my-2 border-l-2 pl-3 italic text-muted-foreground;
+  }
+  .tiptap-editor hr {
+    @apply my-4 border-border;
+  }
+  .tiptap-editor a {
+    @apply underline underline-offset-4;
+  }
+}

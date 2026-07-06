@@ -1,87 +1,87 @@
-# HANDOFF — Phase 5: Admin CMS foundation (`apps/admin`)
+# HANDOFF — Phase 6: Article CRUD + editor + multilingual authoring
 
 ## What I built
 
-- **BFF session**: the browser holds ONLY a first-party httpOnly cookie `ss_admin_session` containing the token pair sealed with **AES-256-GCM** (`lib/crypto.ts`, key = SHA-256 of `ADMIN_SESSION_SECRET`, versioned `v1.` format, IV+tag validated on unseal). Tokens never appear in browser JS, responses, `localStorage`, or `sessionStorage`. Cookie: `HttpOnly`, `SameSite=Lax`, `Path=/`, `Secure` in production, 30-day max-age.
-- **Auth route handlers** (`app/api/auth/*` — the only places cookies are written):
-  - `request-otp` / `verify`: zod-validated proxies to the API's OTP endpoints; `verify` seals the token pair into the cookie and returns only `{ ok: true }`.
-  - `refresh` (GET with sanitized `next` path — rejects `//` and absolute URLs): rotates the refresh token against the API and reseals the cookie — **rotation happens only here, never in RSC render** (RSC cannot write cookies; `requireUser` redirects expiring sessions to this handler).
-  - `logout`: revokes the token family at the API and clears the cookie.
-- **Session plumbing** (`lib/`): `session.ts` (read/write/clear sealed cookie), `jwt.ts` (decode-only expiry check, no verification — the API is the verifier), `api-proxy.ts` (server-side fetches to the API, `cache: no-store`), `require-user.ts` (RSC guard: no session → `/login`; expiring/rejected access token → refresh handler → back).
-- **Login page** (`/login`): two-step phone→code client form using **TanStack Query** mutations against the BFF handlers (introduced here with the first real client mutations, per the Phase 4 deferral note); OTP code still comes from the API server log.
-- **Permission-gated shell** (`app/(dashboard)/layout.tsx`): sidebar nav built from `lib/nav.ts` where each item declares its required permissions (typed `Permission[]` — mistyping one is a compile error); items render only when `GET /auth/me` (DB-resolved, per request) grants them. Dashboard page lists the resolved permissions. UI gating is UX only — the API's `requirePermissions` middleware remains the enforcement point for every future mutation.
-- **`packages/editor-config` finalized** for text authoring: 10 nodes (doc, paragraph, text, heading, bulletList, orderedList, listItem, blockquote, horizontalRule, hardBreak) + 3 marks (bold, italic, link). The web renderer's compile-time parity (Phase 4 proof) covers exactly this set. The `image` node deliberately enters in Phase 7 with the media pipeline, where the parity guard will force renderer coverage in the same change.
-- Admin app hardening: same security headers as web, root-`.env` loading in `next.config.mjs`, `ADMIN_SESSION_SECRET` required at first use (throws if missing).
+- **Editor-config as the enforced single source** (`packages/editor-config`): now exports, beyond the node/mark allow-lists, `allowedHeadingLevels` (2–4), `allowedLinkProtocols` (http/https), and `validateArticleBody(unknown): string[]` — a structural validator (unknown node/mark types, doc-only-at-root, non-empty text, heading-level bounds, absolute http(s) link hrefs, depth cap 20, node cap 5000, first-20 violations). The API validates writes with it, the admin editor builds its extensions from it, and the web renderer's compile-time parity already covers it — one source, three consumers.
+- **Admin article API** (`/admin/*`, all behind `requireAuth` + per-route `requirePermissions`):
+  - `GET /admin/articles` (body-free list, all statuses, `article:edit`), `GET /admin/articles/:id` (full translations).
+  - `POST /admin/articles` (`article:create`) — author is the authenticated user; `PUT /admin/articles/:id` (`article:edit`) — full translation-map replace, must keep the default-language translation (schema-refined).
+  - `POST …/publish|unpublish` (`article:publish`; `publishedAt` set on first publish), `DELETE` (`article:delete`).
+  - Payloads zod-validated (`utils/article-schemas.ts`): bounded title/excerpt, kebab-case latin slugs, ObjectId-shaped refs, and bodies refined through `validateArticleBody` → 400 with the exact violation. Per-language **slug uniqueness across articles** → 409 (`SlugConflictError`).
+- **Admin BFF layer** (`lib/bff.ts` + `app/api/bff/*`): session-aware proxy that reseals the cookie on expiry and retries once on upstream 401; article list/create/get/update/delete/publish/unpublish plus a taxonomy route; ids format-checked before path construction, list query rebuilt from a zod-parsed whitelist (no client-controlled API paths).
+- **TipTap editor built FROM editor-config** (`lib/editor-extensions.ts`): StarterKit options derived from the allow-lists — disallowed nodes/marks (code, codeBlock, strike, underline) hard-disabled, heading levels from `allowedHeadingLevels`, link mark restricted to http/https with no autolink; toolbar (`components/rich-text-editor.tsx`) offers exactly the allowed set, and the link prompt client-validates protocols.
+- **Multilingual authoring** (`components/article-form.tsx`): per-article language tabs — switch, add any missing language (empty translation scaffold), remove any non-default translation; per-tab title/slug/excerpt/body; shared fields (category select, tag toggles, breaking/featured/premium flags) live once on the article. Publish state is per-article. No AI translation anywhere (deferred by design).
+- **Pages**: `/articles` (list with status badges, language codes, publish/unpublish/delete actions gated by the caller's resolved permissions — server passes `me.permissions` from RSC), `/articles/new` (redirects without `article:create`), `/articles/[id]` (edit + publish toggle, redirects without `article:edit`). UI gating is UX; every mutation is enforced server-side by the API middleware.
 
 ## Decisions & deviations
 
-- `SECRETS_ENC_KEY` remains unused (reserved; NewsCore inheritance) — the BFF seal uses `ADMIN_SESSION_SECRET` only.
-- Refresh-via-GET redirect handler: state-changing but only rotates the caller's own session and never returns token material; `SameSite=Lax` + same-origin JSON POSTs cover the CSRF surface for the mutating handlers.
-- Production verification note: under `next start`, the cookie carries `Secure` and the PowerShell client (correctly) refused it over plain http — that behavior is the Secure-flag proof; the functional flow below therefore ran on `next dev` (NODE_ENV=development) against the real API + Atlas.
+- Slugs are latin kebab-case by schema (`^[a-z0-9]+(?:-[a-z0-9]+)*$`) — keeps URLs portable; Devanagari titles live in `title`, not the slug.
+- Admin list serializes translations body-free (bodies stripped to `{type:"doc"}` placeholders) to keep the table light; the edit view fetches the full document.
+- Author selection UI deferred: `authorId` is the authenticated creator (Phase 8's user management can add reassignment if wanted).
+- Cover/media picking is deliberately absent — that is Phase 7's insert-by-mediaId picker; no raw-URL image path exists anywhere.
+- `dev-seed.ts` gained a `writer` fixture (article:create/edit only, phone +919999000003) to prove negative permission gating.
 
 ## Verification (real output)
 
-`pnpm -w typecheck`: `5 successful` · `pnpm -w build`: `3 successful` (admin build lists all four `/api/auth/*` as dynamic routes, `/login` static).
+`pnpm -w typecheck`: `5 successful` · `pnpm -w build`: `3 successful`.
 
-Full BFF login (OTP from the API server log), cookie inspection, admin shell:
-
-```
-verify -> 200 {"ok":true}
-cookie flags: httponly=True samesite-lax=True sealed-v1=True raw-jwt-leak=False
-dashboard -> 200
-shell shows name: True
-shell has users nav: True
-shell has roles nav: True
-shell has articles nav: True
-dashboard shows resolved permission: True
-```
-
-Restricted role sees less (editor: article:create/edit/publish only):
+Full authoring flow over the admin BFF (editor login via OTP from the server log), against Atlas:
 
 ```
-editor dashboard -> 200
-editor sees name: True
-editor sees articles nav: True
-editor sees users nav: False
-editor sees roles nav: False
-editor sees media nav: False
+create -> 201 id=6a4bbad30f64a0170d172038 status=draft
+codeBlock body -> 400 {"error":"doc.content[0]: node type 'codeBlock' is not allowed"}
+js link -> 400 {"error":"doc.content[0].content[0].marks[0]: link href must be an absolute http or https url"}
+duplicate slug -> 409 {"error":"slug 'shiksha-budget-vriddhi' is already used by another article in language 'hi'"}
+publish -> 200 status=published publishedAt=2026-07-06T14:25:25.697Z
+update -> 200 languages=hi+en
+hi title: शिक्षा बजट में बड़ी वृद्धि
+en title: Major increase in education budget
 ```
 
-Server-side rotation via the route handler, then logout:
+Permission gating (server-side, not just UI):
 
 ```
-rotation changed sealed cookie: True
-session valid after rotation: True
-after logout / -> 307 (redirect to login)
+writer publish -> 403 error=forbidden   (writer role: article:create/edit only)
+writer can list -> 200 total=4
+no token -> 401                          (direct GET /admin/articles)
+articles list page -> 200 has-heading=True
 ```
 
-Auth guard and rate-limit passthrough:
+Published article live on the public site (heading, bold, list, blockquote, link, switcher):
 
 ```
-unauthenticated / -> 307 location=/login
-login page -> 200
-(3rd OTP request in window) -> 429 propagated by the BFF
+hindi title: True
+heading node: True
+bold text: True
+list item: True
+blockquote: True
+sanitized link: True
+switcher to en: True
+english title via ?lang=en: True
+english heading: True
+english slug resolves: 200
 ```
 
-Types-live proof (mistyped a nav permission, then reverted):
+Types-live proof (set `status: "archived"` in the admin serializer, then reverted):
 
 ```
-lib/nav.ts(16,46): error TS2820: Type '"media:uplod"' is not assignable to type '"article:create" | ... | "role:manage"'. Did you mean '"media:upload"'?
+src/services/article-admin.service.ts(35,5): error TS2322: Type '"archived"' is not assignable to type '"draft" | "published"'.
 ```
 
-Secret hygiene: `git ls-files` filtered for `.env` → `.env.example` only. Grep for `localStorage|sessionStorage|document.cookie` in `apps/admin` → no matches.
+Secret hygiene: `git ls-files` filtered for `.env` → `.env.example` only.
 
 ## Watch-outs
 
-- `requireUser` runs `/auth/me` per RSC render — acceptable now; consider request-level memoization when the shell grows.
-- The refresh handler redirects to `/login` on any rotation failure (including a reused token → family revoked at the API); users mid-session on a revoked family get a clean re-login, not an error page.
-- Dev server was used for the cookie-flow verification (see decision note); reviewers re-running it need the API up (`tsx src/server.ts`) and a fresh OTP window (per-phone limit 3/5min).
+- An early verification run authored Devanagari through PowerShell's `Invoke-WebRequest`, which mangled some UTF-8; the content was re-put via a Node client (output above). Lesson recorded: drive JSON-with-Devanagari verification through Node, not PS 5.1.
+- Unpublish shares the publish handler (`makeStatusHandler("draft")`) and permission; verified implicitly by the publish path and the writer 403.
+- Deleting an article does not yet guard against nothing — media delete guards arrive in Phase 7; category/tag deletion doesn't exist yet (Phase 8 scope note).
+- Editor's TipTap StarterKit ships input rules for markdown-ish shortcuts of disallowed nodes disabled implicitly (extensions off); if a new node is ever allowed, editor + renderer + validator all update from the one allow-list.
 
 ## Reviews
 
-- build-reviewer: PASS — deliverables verified against uncached runs (route table matches, cookie writes confined to route handlers by grep, TanStack dependency real, nav labels and types-live line/col character-exact, editor-config unchanged with web parity intact).
-- security-reviewer: issues-fixed — BFF token confinement, AES-GCM implementation (fresh IV, tamper→null, length guards), cookie flags, CSRF posture, and input validation all clean. One medium finding (both reviewers converged on it independently): the refresh handler's `next` sanitizer allowed backslash-authority payloads (`/\evil.com` → WHATWG normalizes `\` to `/` → open redirect after rotation). Fixed with `/^\/(?![/\\])/` and proven with a Node repro: `/\evil.com`, `//evil.com`, `/\/evil.com`, and absolute URLs all now resolve to `/`, while `/articles?x=1` passes through.
+- build-reviewer: issues-fixed — all deliverables and HANDOFF authenticity verified against uncached runs (error strings character-exact, types-live line/col confirmed, no AI-translation code). Two defects fixed: (1) toolbar lacked an H4 button despite `allowedHeadingLevels` including 4 — heading buttons are now derived from `allowedHeadingLevels` so the toolbar cannot drift from the config; (2) the BFF list route now `safeParse`s its query and returns 400 instead of 500 on crafted params.
+- security-reviewer: issues-fixed — write-path validation coverage, link-protocol enforcement, zod-gated Mongo keys (runtime-confirmed `$where`/`__proto__` translation keys are rejected), RBAC per route, BFF token confinement, and DoS caps all clean. Two low advisories applied: (1) per-language slug indexes are now `unique, sparse` with duplicate-key errors mapped to the 409 path, closing the check-then-write race; (2) the validator now rejects unknown `attrs` on nodes and marks (per-type attr allow-lists, primitive-only values, length caps, `orderedList.start` bounded) — verified: typical TipTap output passes, `{"onClick":"alert(1)"}` and nested junk attrs are rejected.
 
 ## Next step
 
-Phase 6 — article CRUD + TipTap editor built FROM editor-config + multilingual authoring tabs; server-side body validation against editor-config on write.
+Phase 7 — media library: R2 upload pipeline (mime allowlist, size cap, sharp dims, WebP re-encode), media browser + insert-by-mediaId picker (cover + inline image, which adds the `image` node to editor-config end to end), delete guard for referenced covers.
