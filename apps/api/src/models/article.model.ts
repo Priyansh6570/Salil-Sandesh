@@ -54,6 +54,24 @@ const articleSchema = new Schema(
   { timestamps: true }
 );
 
+articleSchema.index({ status: 1, publishedAt: -1 });
+articleSchema.index({ status: 1, categoryId: 1, publishedAt: -1 });
+articleSchema.index({ status: 1, authorId: 1, publishedAt: -1 });
+articleSchema.index({ status: 1, tagIds: 1, publishedAt: -1 });
+
+for (const code of languageCodes) {
+  articleSchema.index({ [`translations.${code}.slug`]: 1 }, { sparse: true });
+}
+
+articleSchema.index(
+  Object.fromEntries(
+    languageCodes.flatMap((code) => [
+      [`translations.${code}.title`, "text"],
+      [`translations.${code}.excerpt`, "text"],
+    ])
+  ) as Record<string, "text">
+);
+
 articleSchema.pre("validate", function (next) {
   if (this.translations && !this.translations.get(this.defaultLanguage)) {
     next(new Error(`missing translation for default language ${this.defaultLanguage}`));

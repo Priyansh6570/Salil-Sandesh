@@ -143,6 +143,69 @@ export interface MeResponse {
   permissions: Permission[];
 }
 
+export interface SiteConfig {
+  name: string;
+  nameLatin: string;
+  tagline: string;
+  defaultLanguage: LanguageCode;
+  languages: LanguageCode[];
+}
+
+export interface CategoryRef {
+  id: string;
+  name: string;
+  slug: string;
+}
+
+export interface TagRef {
+  id: string;
+  name: string;
+  slug: string;
+}
+
+export interface AuthorRef {
+  id: string;
+  name: string;
+  slug: string;
+}
+
+export interface MediaRef {
+  url: string;
+  width: number;
+  height: number;
+  alt: string;
+}
+
+export interface AuthorPublic extends AuthorRef {
+  bio?: string;
+  avatar?: MediaRef;
+}
+
+export interface ArticleCard extends ArticleFlags {
+  id: string;
+  language: LanguageCode;
+  availableLanguages: LanguageCode[];
+  title: string;
+  excerpt: string;
+  slug: string;
+  category: CategoryRef;
+  author: AuthorRef;
+  cover?: MediaRef;
+  publishedAt?: string;
+}
+
+export interface ArticleDetail extends ArticleCard {
+  body: TipTapNode;
+  tags: TagRef[];
+}
+
+export interface Paginated<T> {
+  items: T[];
+  page: number;
+  limit: number;
+  total: number;
+}
+
 export interface RefreshTokenRecord {
   id: string;
   userId: string;

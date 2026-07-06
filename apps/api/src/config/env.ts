@@ -26,6 +26,7 @@ const envSchema = z.object({
   REFRESH_TTL_DAYS: z.coerce.number().int().positive().default(30),
   OTP_TTL_SECONDS: z.coerce.number().int().positive().default(300),
   OTP_LENGTH: z.coerce.number().int().min(4).max(10).default(6),
+  MEDIA_PUBLIC_BASE_URL: z.string().url(),
 });
 
 const parsed = envSchema.safeParse(process.env);

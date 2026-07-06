@@ -1,96 +1,103 @@
-# HANDOFF — Phase 2: Auth (OTP + rotating refresh + RBAC)
+# HANDOFF — Phase 3: Public read API
 
 ## What I built
 
-- **OTP flow** (`services/otp.service.ts`): request resolves an active staff user by phone, mints a `crypto.randomInt` code, stores only its **HMAC-SHA256 hash** (keyed server-side, so a 6-digit code can't be reversed from a DB dump) in a Mongo `otps` collection (TTL-indexed on `expiresAt`), and prints the code to the server log (dev delivery, no SMS). No-enumeration is response-identical AND cost-identical: the unknown-phone branch performs an equivalent decoy upsert so both paths do one read + one write (security-review fix). The upsert races on the unique phone index fall back to a plain update. Verify uses an atomic `findOneAndUpdate` that enforces expiry and a 5-attempt cap while incrementing attempts, compares hashes with `crypto.timingSafeEqual` (against a decoy hash when no OTP exists), and consumes the OTP on success.
-- **Sessions** (`services/token.service.ts`): HS256 access JWT (`expiresIn` from `JWT_ACCESS_TTL`, parsed to seconds at env validation) + opaque 48-byte refresh tokens stored as sha256 hashes with a `familyId`. Rotation marks the old record `rotated` atomically and issues a new token in the same family; presenting a non-active (replayed) or expired token, or racing a concurrent rotation, **revokes the entire family**. Logout revokes the family. Refresh-token TTL index keys off `expiresAt` only, so `rotated`/`revoked` records survive for reuse detection.
-- **RBAC** (`middleware/auth.ts`, `services/permission.service.ts`): `requireAuth` verifies the JWT (algorithm pinned to HS256); `requirePermissions(...)` re-resolves the user's roles → permissions from the DB on every request (revocation is immediate; blocked users fail closed). `GET /auth/me` returns `{ id, name, roles, permissions }` as shared `MeResponse`.
-- **Rate limiting** (`middleware/rate-limit.ts`): Mongo-backed fixed-window counters (TTL-cleaned), applied per-IP AND per-phone on both `/auth/otp/request` (10/ip, 3/phone per 5 min) and `/auth/otp/verify` (15/ip, 5/phone per 5 min); 429 with `Retry-After`.
-- **Validation & errors**: zod `validateBody` on every auth route (E.164 phone, digit-only code, bounded refresh token), JSON body limit 1mb, JSON error handler that never leaks stack traces.
-- **Bootstrap script** `scripts/ensure-admin.ts`: idempotently creates the system-locked `admin` role (all 10 catalogue permissions) and an admin user for a given phone.
-- Shared types added: `ApiError`, `OtpRequestAck`, `TokenPairResponse`, `MeResponse`.
+- **Site config**: `GET /site` serves the static brand config (`config/site.ts`, typed as shared `SiteConfig`) — no per-tenant anything.
+- **Taxonomy**: `GET /categories` (ordered) and `GET /tags`, serialized to the shared `Category`/`Tag` wire types.
+- **Articles** (all public routes serve only `status: "published"`):
+  - `GET /articles` — paginated body-free cards, `?lang=` selects the translation with centralised fallback to `defaultLanguage`, optional `?featured=true` / `?breaking=true` filters (consumed by the Phase 4 home page).
+  - `GET /articles/search?q=` — Mongo text index across every language's `title`/`excerpt`, body-free cards.
+  - `GET /articles/by-category/:slug`, `/by-tag/:slug`, `/by-author/:slug` — slug resolved to the ref first (404 on unknown), then the same paginated card pipeline.
+  - `GET /articles/:slug?lang=` — detail with TipTap body + tags; the slug matches ANY language's slug (an English slug finds the article and still serves the requested/default language).
+  - `GET /authors/:slug` — public author profile (`AuthorPublic`: name, slug, bio, avatar). Never exposes phone, roles, or status.
+- **Language fallback centralised** in `utils/language.ts` (`resolveTranslation`): requested language if present, else `defaultLanguage`; also reports `availableLanguages` on every card/detail for the Phase 4 language switcher.
+- **Batch resolution, no N+1** (`services/article-read.service.ts`): one `$in` query each for categories, authors, and cover media per page of cards; author avatars and covers rebuilt from `key` + `MEDIA_PUBLIC_BASE_URL` (`utils/media-url.ts`), never a stored URL.
+- **Indexes** on the article schema: `{status, publishedAt}` (+ category/author/tag variants), sparse per-language slug indexes, and one combined text index over all languages' title/excerpt.
+- **Query hygiene**: every query/param parsed with zod (`utils/query-schemas.ts`) — `lang` enum-bound, `page`/`limit` bounded (max 50), `q` length-capped, object-shaped query injection rejected with 400 before any Mongo query.
+- `scripts/dev-seed.ts`: idempotent dev fixtures (2 categories, 2 tags, 1 author with editor role, 1 cover media doc, 2 published Hindi articles — one featured with a full English translation, one breaking Hindi-only — and 1 draft that must never appear publicly). Phase 9 replaces this with the real NewsData-driven seed.
+- Shared types added: `SiteConfig`, `CategoryRef`, `TagRef`, `AuthorRef`, `AuthorPublic`, `MediaRef`, `ArticleCard`, `ArticleDetail`, `Paginated<T>`.
 
 ## Decisions & deviations
 
-- `REDIS_URL` is blank, so OTP and rate-limit state live in Mongo (TTL indexes) as the kickoff's stated fallback; swapping to Redis later only replaces the two storage touchpoints.
-- `requirePermissions` ships now (part of the phase's RBAC deliverable) but its first route consumers arrive with the write paths (Phase 6/8); its resolution path is the same `resolveUserAccess` proven live via `/auth/me`, and its permission-name type safety is proven below.
-- No `trust proxy` set: `req.ip` is the socket address, so the IP rate limit cannot be spoofed via `X-Forwarded-For` in dev. Set `trust proxy` appropriately at deployment behind a proxy (noted for the deploy phase).
-- Test admin seeded with dummy phone `+919999000001` (OTP comes from the log, so no real SMS number is needed).
+- `MEDIA_PUBLIC_BASE_URL` is now a required env var (URL-validated) since cover URLs are built from it; the API fails at boot without it.
+- Detail lookup matches the slug across all languages via `$or` over the per-language sparse indexes; per-language slug uniqueness is still a Phase 6 write-path concern.
+- `?featured=`/`?breaking=` filters added to the list endpoint because Phase 4's home page consumes them — noted to keep the scope ledger honest.
+- Seed media keys (e.g. `seed/cover-monsoon.webp`) don't exist in R2 yet; URLs are structurally correct and Phase 7/9 put real objects behind them.
 
 ## Verification (real output)
 
-`pnpm -w typecheck`: `Tasks: 5 successful, 5 total` · `pnpm -w build`: `Tasks: 3 successful, 3 total, Time: 13.666s`.
+`pnpm -w typecheck`: `5 successful, 5 total` · `pnpm -w build`: `3 successful, 3 total, Time: 15.291s`.
 
-Seed + boot against Atlas:
-
-```
-{"role":"admin","rolePermissions":10,"userId":"6a4b9be005f4694c0bacec69","userName":"Administrator","userStatus":"active"}
-connected to mongodb database salil_sandesh
-api listening on 0.0.0.0:4000
-[otp] delivery for +919999000001: 839782
-```
-
-No-enumeration (identical bodies for known and unknown phone):
+Seed (`tsx src/scripts/dev-seed.ts`):
 
 ```
-known-phone response: {"message":"if the phone is registered, a code has been sent"}
-unknown-phone response: {"message":"if the phone is registered, a code has been sent"}
+dev-seed connected to salil_sandesh
+{"author":"sandeep-sharma","categories":["rashtriya","khel"],"tags":["chunav","cricket"],"cover":"seed/cover-monsoon.webp","published":[{"id":"6a4b9f4005f4694c0bacec82","languages":["hi","en"]},{"id":"6a4b9f4005f4694c0bacec83","languages":["hi"]}],"draft":{"id":"6a4b9f4005f4694c0bacec84","status":"draft"}}
 ```
 
-Login end to end (code taken from the server log):
+Live reads against Atlas:
 
 ```
-wrong code -> 401 {"error":"invalid phone or code"}
-verify ok -> access: eyJhbGciOiJIUzI1NiIsInR5c... refresh: aYPRQnAisvt_... (len 64)
-me -> {"id":"6a4b9be005f4694c0bacec69","name":"Administrator","roles":["admin"],"permissions":["article:create","article:edit","article:publish","article:delete","media:upload","media:manage","category:manage","tag:manage","user:manage","role:manage"]}
+SITE: {"name":"सलिल संदेश","nameLatin":"Salil Sandesh","tagline":"आपका विश्वसनीय समाचार स्रोत","defaultLanguage":"hi","languages":["hi","en","bn","gu","mr","pa","ta","te","ur"]}
+CATEGORIES: rashtriya,khel
+TAGS: cricket,chunav
+LIST: total=2 items=2
+  card: [hi] भारत ने रोमांचक मुकाबले में सीरीज़ जीती | slug=bharat-series-jeet | author=संदीप शर्मा | cat=khel | cover=none | body-free=True
+  card: [hi] मानसून सत्र में जल नीति पर बड़ा फैसला | slug=monsoon-satra-jal-niti | author=संदीप शर्मा | cat=rashtriya | cover=https://pub-aa65b5478f16452289b7209ad7e2c7f6.r2.dev/seed/cover-monsoon.webp | body-free=True
 ```
 
-Rotation, reuse detection, family revoke:
+Language selection and fallback (`?lang=en`):
 
 ```
-rotation -> old: aYPRQnAisvt_... new: -UDyV_jZB5_e... (different: True)
-replay of rotated-out token -> 401 {"error":"invalid refresh token"}
-post-reuse: NEW token also -> 401 {"error":"invalid refresh token"} (family revoked)
+lang=en card: [hi] भारत ने रोमांचक मुकाबले में सीरीज़ जीती | available=hi
+lang=en card: [en] Major water policy decision expected in monsoon session | available=hi+en
 ```
 
-Rate limit (3/phone per 5 min; one request already spent in the window above), auth guard, input validation:
+Detail, cross-language slugs, drafts, 404s:
 
 ```
-request 1 -> 200
-request 2 -> 200
-request 3 -> 429 {"error":"too many requests"}
-request 4 -> 429 {"error":"too many requests"}
-request 5 -> 429 {"error":"too many requests"}
-me without token -> 401
-malformed phone -> 400 {"error":"invalid request body"}
+detail hi-slug: [hi] मानसून सत्र में जल नीति पर बड़ा फैसला | body.type=doc nodes=5 | tags=chunav
+detail ?lang=en: [en] Major water policy decision expected in monsoon session
+detail by EN slug: [hi] मानसून सत्र में जल नीति पर बड़ा फैसला
+untranslated ?lang=en falls back: [hi] भारत ने रोमांचक मुकाबले में सीरीज़ जीती
+draft slug -> 404
+unknown slug -> 404
 ```
 
-Types-live proof (added `requirePermissions("article:fly")` to a route, then reverted):
+Filtered lists, search (Hindi and English), author profile, input guards:
 
 ```
-src/routes/auth.routes.ts(49,63): error TS2345: Argument of type '"article:fly"' is not assignable to parameter of type '"article:create" | "article:edit" | "article:publish" | "article:delete" | "media:upload" | "media:manage" | "category:manage" | "tag:manage" | "user:manage" | "role:manage"'.
+by-category khel: total=1 first=भारत ने रोमांचक मुकाबले में सीरीज़ जीती
+by-tag chunav: total=1 first=मानसून सत्र में जल नीति पर बड़ा फैसला
+by-author: total=2
+featured filter: total=1 first=monsoon-satra-jal-niti
+search 'जल': total=1 first=monsoon-satra-jal-niti
+search 'water' lang=en: total=1 first=[en] Major water policy decision expected in monsoon session
+author profile: {"id":"6a4b9f4005f4694c0bacec7c","name":"संदीप शर्मा","slug":"sandeep-sharma","bio":"वरिष्ठ संवाददाता, दो दशक का पत्रकारिता अनुभव"}
+author has phone field: False
+unknown category -> 404
+bad page param -> 400
 ```
 
-Post-review hardening re-verified live (fresh boot, code `736097` from the log; decoy write for the unknown phone produced no log line and no login path):
+Types-live proof (set `isBreaking: "yes"` in the card assembler, then reverted):
 
 ```
-hardened login ok -> Administrator roles=admin perms=10
-decoy-phone verify -> 401 {"error":"invalid phone or code"}
+src/services/article-read.service.ts(84,5): error TS2322: Type 'string' is not assignable to type 'boolean'.
 ```
 
-Secret hygiene: `git ls-files` filtered for `.env` → `.env.example` only. OTP codes appear ONLY in the server log, never in responses; refresh tokens are stored as sha256 hashes and OTP codes as server-keyed HMAC-SHA256 hashes.
+Secret hygiene: `git ls-files` filtered for `.env` → `.env.example` only.
 
 ## Watch-outs
 
-- Access JWT carries only `sub` (user id); roles/permissions are always DB-resolved, so a role edit or user block takes effect on the next request, not at token expiry.
-- Per-phone rate-limit keys are derived from the zod-validated E.164 phone, so the key space can't be polluted with arbitrary strings; IP keys use the raw socket address until `trust proxy` is configured at deployment.
-- The seeded `+919999000001` admin is for dev verification; Phase 9's seed creates the real staff set, and any phone can be promoted via `ensure-admin`.
+- Search uses Mongo's text index (language-agnostic tokenizer); Hindi stemming is basic. Good enough for now; revisit if search quality matters later.
+- The cover URL host (`pub-…r2.dev`) is the controlled origin from env — Phase 4's `next/image` `remotePatterns` must allowlist exactly this host and nothing else.
+- Author pages expose any active staff user by exact slug (name/slug/bio/avatar only). If authors-without-articles should 404, tighten in Phase 4/8.
 
 ## Reviews
 
-- build-reviewer: issues-fixed — deliverables, wiring, rate-limit numbers, HANDOFF authenticity (string-level cross-check, token length/format, ObjectId timestamps) all verified against uncached typecheck/build runs. One defect fixed: `ApiError` had no consumer; every error send site now carries `satisfies ApiError`, binding the shared error shape at compile time.
-- security-reviewer: issues-fixed — secrets, OTP hygiene, rotation/reuse-detection (including the concurrent-rotation race failing safe), JWT algorithm pinning, DB-resolved RBAC, and injection surfaces all clean. Three findings fixed: (1) medium — unknown-phone OTP requests now perform an equivalent decoy DB write, closing the timing side-channel on enumeration; (2) low — OTP hashes are now HMAC-SHA256 keyed with a server secret instead of bare sha256 of a 10^6 code space; (3) low — the OTP upsert duplicate-key race now falls back to an update instead of throwing 500. Advisories recorded: set `trust proxy` to the exact hop count at deployment; malformed bodies 400 before touching rate-limit counters (accepted).
+- build-reviewer: PASS — deliverables, wiring, route ordering, no-N+1 batch resolution, index set, zod bindings, seed idempotency, and HANDOFF authenticity (sort orders, node counts, and types-live line/col cross-checked against source) all verified; no defects. Noted (non-blocking): search accepts-but-ignores `featured`/`breaking`; card assembly falls back to empty refs if a lookup misses.
+- security-reviewer: issues-fixed — secrets, draft isolation on every route, field-explicit serialization (no phone/roles/status leaks), zod-gated query injection, media-URL-from-key-only all clean. One-line low fix applied: the `status: "published"` gate now spreads AFTER caller filters so it can never be overridden. Deferred with scope notes: per-IP rate limit on public search (pre-launch), authors-without-articles exposure (Phase 8), custom media domain to replace `*.r2.dev` (pre-launch).
 
 ## Next step
 
-Phase 3 — public read API: site config, categories, tags, article list/detail/by-author/by-tag/by-category with centralised `?lang=` fallback, search, batch author/cover resolution onto cards.
+Phase 4 — public website (`apps/web`): shell, home (featured/latest/by-section), article page with typed TipTap renderer + language switcher, section/author/tag/search pages, static pages, `next/image` allowlist, hi-default i18n dictionary.
