@@ -5,12 +5,13 @@ import {
   allowedMarks,
   allowedNodes,
 } from "@salil-sandesh/editor-config";
+import { MediaImage } from "./image-extension";
 
 const nodeSet = new Set<string>(allowedNodes);
 const markSet = new Set<string>(allowedMarks);
 
 export function editorExtensions(): Extensions {
-  return [
+  const extensions: Extensions = [
     StarterKit.configure({
       heading: nodeSet.has("heading")
         ? { levels: [...allowedHeadingLevels] }
@@ -37,4 +38,8 @@ export function editorExtensions(): Extensions {
       underline: false,
     }),
   ];
+  if (nodeSet.has("image")) {
+    extensions.push(MediaImage);
+  }
+  return extensions;
 }

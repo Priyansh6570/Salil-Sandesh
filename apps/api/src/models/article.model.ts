@@ -40,6 +40,11 @@ const articleSchema = new Schema(
     authorId: { type: Schema.Types.ObjectId, ref: "User", required: true },
     tagIds: { type: [{ type: Schema.Types.ObjectId, ref: "Tag" }], required: true, default: [] },
     coverMediaId: { type: Schema.Types.ObjectId, ref: "Media" },
+    referencedMediaIds: {
+      type: [{ type: Schema.Types.ObjectId, ref: "Media" }],
+      required: true,
+      default: [],
+    },
     isBreaking: { type: Boolean, required: true, default: false },
     isFeatured: { type: Boolean, required: true, default: false },
     isPremium: { type: Boolean, required: true, default: false },
@@ -58,6 +63,7 @@ articleSchema.index({ status: 1, publishedAt: -1 });
 articleSchema.index({ status: 1, categoryId: 1, publishedAt: -1 });
 articleSchema.index({ status: 1, authorId: 1, publishedAt: -1 });
 articleSchema.index({ status: 1, tagIds: 1, publishedAt: -1 });
+articleSchema.index({ referencedMediaIds: 1 });
 
 for (const code of languageCodes) {
   articleSchema.index({ [`translations.${code}.slug`]: 1 }, { unique: true, sparse: true });

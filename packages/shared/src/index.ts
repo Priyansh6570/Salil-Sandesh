@@ -123,6 +123,16 @@ export interface Media {
   updatedAt: string;
 }
 
+export interface MediaSummary {
+  id: string;
+  url: string;
+  alt: string;
+  width: number;
+  height: number;
+  kind: MediaKind;
+  createdAt: string;
+}
+
 export interface ApiError {
   error: string;
 }

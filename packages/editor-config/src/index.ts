@@ -11,6 +11,7 @@ export const allowedNodes = [
   "blockquote",
   "horizontalRule",
   "hardBreak",
+  "image",
 ] as const;
 
 export const allowedMarks = ["bold", "italic", "link"] as const;
@@ -34,6 +35,7 @@ export const allowedNodeAttrs: Record<AllowedNode, readonly string[]> = {
   blockquote: [],
   horizontalRule: [],
   hardBreak: [],
+  image: ["mediaId", "alt", "width", "height"],
 };
 
 export const allowedMarkAttrs: Record<AllowedMark, readonly string[]> = {
@@ -168,6 +170,15 @@ function validateNode(node: unknown, path: string, depth: number, state: Validat
       state.violations.push(`${path}: orderedList start must be a positive integer`);
     }
   }
+  if (node.type === "image") {
+    const attrs = isRecord(node.attrs) ? node.attrs : {};
+    if (typeof attrs.mediaId !== "string" || !/^[0-9a-f]{24}$/.test(attrs.mediaId)) {
+      state.violations.push(`${path}: image requires a valid mediaId`);
+    }
+    if (node.content !== undefined) {
+      state.violations.push(`${path}: image node cannot have content`);
+    }
+  }
   if (node.marks !== undefined) {
     if (!Array.isArray(node.marks)) {
       state.violations.push(`${path}: marks must be an array`);
@@ -197,6 +208,21 @@ export function validateArticleBody(body: unknown): string[] {
 
 export function isValidArticleBody(body: unknown): body is TipTapNode {
   return validateArticleBody(body).length === 0;
+}
+
+export function collectImageMediaIds(body: TipTapNode): string[] {
+  const ids = new Set<string>();
+  const walk = (node: TipTapNode): void => {
+    if (node.type === "image") {
+      const mediaId = node.attrs?.mediaId;
+      if (typeof mediaId === "string") {
+        ids.add(mediaId);
+      }
+    }
+    node.content?.forEach(walk);
+  };
+  walk(body);
+  return [...ids];
 }
 
 export type { TipTapMark, TipTapNode };

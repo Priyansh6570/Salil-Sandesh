@@ -1,3 +1,4 @@
+import Image from "next/image";
 import { createElement, Fragment, type ReactNode } from "react";
 import type { TipTapMark, TipTapNode } from "@salil-sandesh/shared";
 import {
@@ -117,6 +118,28 @@ const nodeRenderers: Record<
   ),
   horizontalRule: (_node, key) => <hr key={key} className="my-6 border-border" />,
   hardBreak: (_node, key) => <br key={key} />,
+  image: (node, key) => {
+    const attrs = node.attrs ?? {};
+    const src = typeof attrs.src === "string" ? attrs.src : null;
+    const width = typeof attrs.width === "number" ? attrs.width : 0;
+    const height = typeof attrs.height === "number" ? attrs.height : 0;
+    if (!src || width <= 0 || height <= 0) {
+      return null;
+    }
+    const alt = typeof attrs.alt === "string" ? attrs.alt : "";
+    return (
+      <span key={key} className="my-4 block">
+        <Image
+          src={src}
+          alt={alt}
+          width={width}
+          height={height}
+          sizes="(max-width: 768px) 100vw, 768px"
+          className="h-auto w-full rounded-lg"
+        />
+      </span>
+    );
+  },
 };
 
 function renderNode(node: TipTapNode, key: string, unsupportedLabel: string): ReactNode {

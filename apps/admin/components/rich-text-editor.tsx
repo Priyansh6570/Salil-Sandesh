@@ -6,6 +6,7 @@ import {
   Heading2,
   Heading3,
   Heading4,
+  Image as ImageIcon,
   Italic,
   Link as LinkIcon,
   List,
@@ -14,11 +15,16 @@ import {
   Quote,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import type { TipTapNode } from "@salil-sandesh/shared";
-import { allowedHeadingLevels, type AllowedHeadingLevel } from "@salil-sandesh/editor-config";
+import { useState } from "react";
+import type { MediaSummary, TipTapNode } from "@salil-sandesh/shared";
+import { allowedHeadingLevels, allowedNodes, type AllowedHeadingLevel } from "@salil-sandesh/editor-config";
 import { Button } from "@/components/ui/button";
+import { MediaPicker } from "@/components/media-picker";
 import { editorExtensions } from "@/lib/editor-extensions";
+import { stripInlineImageSrc } from "@/lib/strip-image-src";
 import { cn } from "@/lib/utils";
+
+const imageAllowed = (allowedNodes as readonly string[]).includes("image");
 
 const headingIcons: Record<AllowedHeadingLevel, LucideIcon> = {
   2: Heading2,
@@ -81,12 +87,13 @@ export function RichTextEditor({
   value: TipTapNode;
   onChange: (body: TipTapNode) => void;
 }) {
+  const [pickerOpen, setPickerOpen] = useState(false);
   const editor = useEditor({
     extensions: editorExtensions(),
     content: value,
     immediatelyRender: false,
     onUpdate: ({ editor: instance }) => {
-      onChange(instance.getJSON() as TipTapNode);
+      onChange(stripInlineImageSrc(instance.getJSON() as TipTapNode));
     },
     editorProps: {
       attributes: {
@@ -97,6 +104,23 @@ export function RichTextEditor({
   if (!editor) {
     return <div className="min-h-48 rounded-md border" />;
   }
+  const insertImage = (media: MediaSummary): void => {
+    editor
+      .chain()
+      .focus()
+      .insertContent({
+        type: "image",
+        attrs: {
+          mediaId: media.id,
+          src: media.url,
+          alt: media.alt,
+          width: media.width,
+          height: media.height,
+        },
+      })
+      .run();
+    setPickerOpen(false);
+  };
   return (
     <div className="rounded-md border">
       <div className="flex flex-wrap items-center gap-1 border-b p-1">
@@ -157,8 +181,16 @@ export function RichTextEditor({
         >
           <Minus className="h-4 w-4" />
         </ToolbarButton>
+        {imageAllowed ? (
+          <ToolbarButton label="छवि जोड़ें" onClick={() => setPickerOpen(true)}>
+            <ImageIcon className="h-4 w-4" />
+          </ToolbarButton>
+        ) : null}
       </div>
       <EditorContent editor={editor} className={cn("px-3 py-2")} />
+      {pickerOpen ? (
+        <MediaPicker onSelect={insertImage} onClose={() => setPickerOpen(false)} />
+      ) : null}
     </div>
   );
 }

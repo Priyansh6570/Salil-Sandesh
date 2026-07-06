@@ -5,4 +5,5 @@ export default defineConfig({
   format: ["esm"],
   clean: true,
   noExternal: ["@salil-sandesh/shared", "@salil-sandesh/editor-config"],
+  external: ["sharp"],
 });

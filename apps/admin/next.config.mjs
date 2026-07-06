@@ -12,8 +12,19 @@ const securityHeaders = [
   { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
 ];
 
+const remotePatterns = [];
+if (process.env.MEDIA_PUBLIC_BASE_URL) {
+  const mediaUrl = new URL(process.env.MEDIA_PUBLIC_BASE_URL);
+  remotePatterns.push({
+    protocol: mediaUrl.protocol.replace(":", ""),
+    hostname: mediaUrl.hostname,
+    pathname: `${mediaUrl.pathname.replace(/\/$/, "")}/**`,
+  });
+}
+
 const nextConfig = {
   transpilePackages: ["@salil-sandesh/shared", "@salil-sandesh/editor-config"],
+  images: { remotePatterns },
   headers: async () => [{ source: "/:path*", headers: securityHeaders }],
 };
 

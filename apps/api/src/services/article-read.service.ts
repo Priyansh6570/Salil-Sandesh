@@ -10,6 +10,7 @@ import type {
   TipTapNode,
 } from "@salil-sandesh/shared";
 import { languageCodes } from "@salil-sandesh/shared";
+import { collectImageMediaIds } from "@salil-sandesh/editor-config";
 import type { FilterQuery, HydratedDocument } from "mongoose";
 import {
   ArticleModel,
@@ -145,5 +146,51 @@ export async function getPublishedArticleBySlug(
   }
   const { translation } = resolveTranslation(doc, lang);
   const tagRefs: TagRef[] = tags.map((tag) => ({ id: tag.id, name: tag.name, slug: tag.slug }));
-  return { ...card, body: translation.body as TipTapNode, tags: tagRefs };
+  const body = await resolveInlineImages(translation.body as TipTapNode);
+  return { ...card, body, tags: tagRefs };
+}
+
+async function resolveInlineImages(body: TipTapNode): Promise<TipTapNode> {
+  const mediaIds = collectImageMediaIds(body);
+  if (mediaIds.length === 0) {
+    return body;
+  }
+  const media = await MediaModel.find({ _id: { $in: mediaIds } });
+  const byId = new Map(
+    media.map((doc) => [
+      doc.id,
+      { url: mediaUrlFromKey(doc.key), width: doc.width, height: doc.height, alt: doc.alt },
+    ])
+  );
+  const transform = (node: TipTapNode): TipTapNode | null => {
+    if (node.type === "image") {
+      const mediaId = typeof node.attrs?.mediaId === "string" ? node.attrs.mediaId : undefined;
+      const resolved = mediaId ? byId.get(mediaId) : undefined;
+      if (!resolved) {
+        return null;
+      }
+      const altAttr = typeof node.attrs?.alt === "string" && node.attrs.alt.length > 0
+        ? node.attrs.alt
+        : resolved.alt;
+      return {
+        type: "image",
+        attrs: {
+          src: resolved.url,
+          alt: altAttr,
+          width: resolved.width,
+          height: resolved.height,
+        },
+      };
+    }
+    if (!node.content) {
+      return node;
+    }
+    return {
+      ...node,
+      content: node.content
+        .map(transform)
+        .filter((child): child is TipTapNode => child !== null),
+    };
+  };
+  return transform(body) ?? body;
 }

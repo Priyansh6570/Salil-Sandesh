@@ -12,6 +12,7 @@
     "@salil-sandesh/editor-config": "workspace:*",
     "@salil-sandesh/shared": "workspace:*",
     "@tanstack/react-query": "^5.101.2",
+    "@tiptap/core": "^3.27.2",
     "@tiptap/extension-link": "^3.27.2",
     "@tiptap/pm": "^3.27.2",
     "@tiptap/react": "^3.27.2",

@@ -7,7 +7,13 @@ import {
   handleAdminUpdateArticle,
   makeStatusHandler,
 } from "../controllers/admin-article.controller";
+import {
+  handleDeleteMedia,
+  handleListMedia,
+  handleUploadMedia,
+} from "../controllers/media.controller";
 import { requireAuth, requirePermissions } from "../middleware/auth";
+import { uploadImageMiddleware } from "../middleware/upload";
 import { asyncHandler } from "../utils/async-handler";
 
 export const adminRouter = Router();
@@ -42,4 +48,21 @@ adminRouter.delete(
   "/articles/:id",
   requirePermissions("article:delete"),
   asyncHandler(handleAdminDeleteArticle)
+);
+
+adminRouter.get(
+  "/media",
+  requirePermissions("media:upload"),
+  asyncHandler(handleListMedia)
+);
+adminRouter.post(
+  "/media",
+  requirePermissions("media:upload"),
+  uploadImageMiddleware,
+  asyncHandler(handleUploadMedia)
+);
+adminRouter.delete(
+  "/media/:id",
+  requirePermissions("media:manage"),
+  asyncHandler(handleDeleteMedia)
 );

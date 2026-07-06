@@ -27,6 +27,11 @@ const envSchema = z.object({
   OTP_TTL_SECONDS: z.coerce.number().int().positive().default(300),
   OTP_LENGTH: z.coerce.number().int().min(4).max(10).default(6),
   MEDIA_PUBLIC_BASE_URL: z.string().url(),
+  R2_ACCOUNT_ID: z.string().min(1),
+  R2_ACCESS_KEY_ID: z.string().min(1),
+  R2_SECRET_ACCESS_KEY: z.string().min(1),
+  R2_BUCKET: z.string().min(1),
+  R2_ENDPOINT: z.string().url(),
 });
 
 const parsed = envSchema.safeParse(process.env);

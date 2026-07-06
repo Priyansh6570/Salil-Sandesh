@@ -2,16 +2,20 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
+import Image from "next/image";
 import type {
   Article,
   ArticleTranslation,
   Category,
   LanguageCode,
+  MediaSummary,
   Tag,
   TipTapNode,
 } from "@salil-sandesh/shared";
 import { defaultLanguageCode, languageCodes } from "@salil-sandesh/shared";
+import { MediaPicker } from "@/components/media-picker";
 import { RichTextEditor } from "@/components/rich-text-editor";
+import { stripInlineImageSrc } from "@/lib/strip-image-src";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -45,6 +49,7 @@ export interface ArticleFormPayload {
   translations: Partial<Record<LanguageCode, ArticleTranslation>>;
   categoryId: string;
   tagIds: string[];
+  coverMediaId?: string;
   isBreaking: boolean;
   isFeatured: boolean;
   isPremium: boolean;
@@ -77,6 +82,9 @@ export function ArticleForm({
   const [isBreaking, setIsBreaking] = useState(initial?.isBreaking ?? false);
   const [isFeatured, setIsFeatured] = useState(initial?.isFeatured ?? false);
   const [isPremium, setIsPremium] = useState(initial?.isPremium ?? false);
+  const [cover, setCover] = useState<MediaSummary | null>(null);
+  const [coverMediaId, setCoverMediaId] = useState(initial?.coverMediaId ?? "");
+  const [coverPickerOpen, setCoverPickerOpen] = useState(false);
   const defaultLanguage = initial?.defaultLanguage ?? defaultLanguageCode;
 
   const taxonomy = useQuery<Taxonomy>({
@@ -129,11 +137,19 @@ export function ArticleForm({
       className="space-y-6"
       onSubmit={(event) => {
         event.preventDefault();
+        const cleanedTranslations: Partial<Record<LanguageCode, ArticleTranslation>> = {};
+        for (const [language, translation] of Object.entries(translations)) {
+          cleanedTranslations[language as LanguageCode] = {
+            ...translation,
+            body: stripInlineImageSrc(translation.body as TipTapNode),
+          };
+        }
         onSubmit({
           defaultLanguage,
-          translations,
+          translations: cleanedTranslations,
           categoryId,
           tagIds,
+          coverMediaId: coverMediaId || undefined,
           isBreaking,
           isFeatured,
           isPremium,
@@ -253,6 +269,36 @@ export function ArticleForm({
             </select>
           </div>
           <div className="space-y-2">
+            <Label>कवर छवि</Label>
+            <div className="flex items-center gap-3">
+              {cover ? (
+                <span className="relative block h-16 w-28 overflow-hidden rounded border">
+                  <Image src={cover.url} alt={cover.alt} fill sizes="112px" className="object-cover" />
+                </span>
+              ) : coverMediaId ? (
+                <span className="text-sm text-muted-foreground">चयनित (id: {coverMediaId.slice(-6)})</span>
+              ) : (
+                <span className="text-sm text-muted-foreground">कोई कवर नहीं</span>
+              )}
+              <Button type="button" variant="outline" size="sm" onClick={() => setCoverPickerOpen(true)}>
+                {coverMediaId ? "बदलें" : "चुनें"}
+              </Button>
+              {coverMediaId ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setCover(null);
+                    setCoverMediaId("");
+                  }}
+                >
+                  हटाएँ
+                </Button>
+              ) : null}
+            </div>
+          </div>
+          <div className="space-y-2">
             <Label>टैग</Label>
             <div className="flex flex-wrap gap-2">
               {(taxonomy.data?.tags ?? []).map((tag) => (
@@ -296,6 +342,16 @@ export function ArticleForm({
       <Button type="submit" disabled={submitting}>
         सहेजें
       </Button>
+      {coverPickerOpen ? (
+        <MediaPicker
+          onSelect={(media) => {
+            setCover(media);
+            setCoverMediaId(media.id);
+            setCoverPickerOpen(false);
+          }}
+          onClose={() => setCoverPickerOpen(false)}
+        />
+      ) : null}
     </form>
   );
 }

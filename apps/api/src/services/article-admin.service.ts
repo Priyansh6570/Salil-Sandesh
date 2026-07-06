@@ -1,7 +1,22 @@
-import type { Article, LanguageCode, Paginated } from "@salil-sandesh/shared";
+import type { Article, LanguageCode, Paginated, TipTapNode } from "@salil-sandesh/shared";
+import { collectImageMediaIds } from "@salil-sandesh/editor-config";
 import type { HydratedDocument } from "mongoose";
-import { ArticleModel, type ArticleDoc } from "../models";
+import { ArticleModel, MediaModel, type ArticleDoc } from "../models";
+import { mediaUrlFromKey } from "../utils/media-url";
 import type { ArticlePayload } from "../utils/article-schemas";
+
+function referencedMediaIds(payload: ArticlePayload): string[] {
+  const ids = new Set<string>();
+  if (payload.coverMediaId) {
+    ids.add(payload.coverMediaId);
+  }
+  for (const translation of Object.values(payload.translations)) {
+    for (const mediaId of collectImageMediaIds(translation.body as TipTapNode)) {
+      ids.add(mediaId);
+    }
+  }
+  return [...ids];
+}
 
 type ArticleHydrated = HydratedDocument<ArticleDoc>;
 
@@ -100,9 +115,38 @@ export async function listAllArticles(options: {
   };
 }
 
+function enrichImageNode(node: TipTapNode, urls: Map<string, string>): TipTapNode {
+  if (node.type === "image") {
+    const mediaId = typeof node.attrs?.mediaId === "string" ? node.attrs.mediaId : undefined;
+    const url = mediaId ? urls.get(mediaId) : undefined;
+    return { ...node, attrs: { ...node.attrs, src: url ?? null } };
+  }
+  if (!node.content) {
+    return node;
+  }
+  return { ...node, content: node.content.map((child) => enrichImageNode(child, urls)) };
+}
+
 export async function getArticleById(id: string): Promise<Article | null> {
   const doc = await ArticleModel.findById(id);
-  return doc ? toWire(doc) : null;
+  if (!doc) {
+    return null;
+  }
+  const wire = toWire(doc);
+  const mediaIds = [...doc.referencedMediaIds].map((mediaId) => mediaId.toString());
+  if (mediaIds.length === 0) {
+    return wire;
+  }
+  const media = await MediaModel.find({ _id: { $in: mediaIds } });
+  const urls = new Map(media.map((mediaDoc) => [mediaDoc.id, mediaUrlFromKey(mediaDoc.key)]));
+  const translations: Article["translations"] = {};
+  for (const [language, translation] of Object.entries(wire.translations)) {
+    translations[language as LanguageCode] = {
+      ...translation,
+      body: enrichImageNode(translation.body, urls),
+    };
+  }
+  return { ...wire, translations };
 }
 
 export async function createArticle(
@@ -121,6 +165,7 @@ export async function createArticle(
       isBreaking: payload.isBreaking,
       isFeatured: payload.isFeatured,
       isPremium: payload.isPremium,
+      referencedMediaIds: referencedMediaIds(payload),
       status: "draft",
     })
   );
@@ -147,6 +192,7 @@ export async function updateArticle(
   doc.isBreaking = payload.isBreaking;
   doc.isFeatured = payload.isFeatured;
   doc.isPremium = payload.isPremium;
+  doc.set("referencedMediaIds", referencedMediaIds(payload));
   doc.markModified("translations");
   await mapDuplicateKey(payload, () => doc.save());
   return toWire(doc);

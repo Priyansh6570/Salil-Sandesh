@@ -1,87 +1,81 @@
-# HANDOFF — Phase 6: Article CRUD + editor + multilingual authoring
+# HANDOFF — Phase 7: Media library (R2)
 
 ## What I built
 
-- **Editor-config as the enforced single source** (`packages/editor-config`): now exports, beyond the node/mark allow-lists, `allowedHeadingLevels` (2–4), `allowedLinkProtocols` (http/https), and `validateArticleBody(unknown): string[]` — a structural validator (unknown node/mark types, doc-only-at-root, non-empty text, heading-level bounds, absolute http(s) link hrefs, depth cap 20, node cap 5000, first-20 violations). The API validates writes with it, the admin editor builds its extensions from it, and the web renderer's compile-time parity already covers it — one source, three consumers.
-- **Admin article API** (`/admin/*`, all behind `requireAuth` + per-route `requirePermissions`):
-  - `GET /admin/articles` (body-free list, all statuses, `article:edit`), `GET /admin/articles/:id` (full translations).
-  - `POST /admin/articles` (`article:create`) — author is the authenticated user; `PUT /admin/articles/:id` (`article:edit`) — full translation-map replace, must keep the default-language translation (schema-refined).
-  - `POST …/publish|unpublish` (`article:publish`; `publishedAt` set on first publish), `DELETE` (`article:delete`).
-  - Payloads zod-validated (`utils/article-schemas.ts`): bounded title/excerpt, kebab-case latin slugs, ObjectId-shaped refs, and bodies refined through `validateArticleBody` → 400 with the exact violation. Per-language **slug uniqueness across articles** → 409 (`SlugConflictError`).
-- **Admin BFF layer** (`lib/bff.ts` + `app/api/bff/*`): session-aware proxy that reseals the cookie on expiry and retries once on upstream 401; article list/create/get/update/delete/publish/unpublish plus a taxonomy route; ids format-checked before path construction, list query rebuilt from a zod-parsed whitelist (no client-controlled API paths).
-- **TipTap editor built FROM editor-config** (`lib/editor-extensions.ts`): StarterKit options derived from the allow-lists — disallowed nodes/marks (code, codeBlock, strike, underline) hard-disabled, heading levels from `allowedHeadingLevels`, link mark restricted to http/https with no autolink; toolbar (`components/rich-text-editor.tsx`) offers exactly the allowed set, and the link prompt client-validates protocols.
-- **Multilingual authoring** (`components/article-form.tsx`): per-article language tabs — switch, add any missing language (empty translation scaffold), remove any non-default translation; per-tab title/slug/excerpt/body; shared fields (category select, tag toggles, breaking/featured/premium flags) live once on the article. Publish state is per-article. No AI translation anywhere (deferred by design).
-- **Pages**: `/articles` (list with status badges, language codes, publish/unpublish/delete actions gated by the caller's resolved permissions — server passes `me.permissions` from RSC), `/articles/new` (redirects without `article:create`), `/articles/[id]` (edit + publish toggle, redirects without `article:edit`). UI gating is UX; every mutation is enforced server-side by the API middleware.
+- **Upload pipeline** (`apps/api/src/services/media.service.ts`): mime allowlist (jpeg/png/webp/gif/avif), 8 MB size cap, `sharp` reads real dimensions (fails closed if unreadable), auto-rotates by EXIF, downscales to ≤2400px longest edge, and **re-encodes every upload to WebP** (quality 82). Stored in R2 under `media/<year>/<uuid>.webp` with a 1-year immutable cache header; a Media doc records key + dimensions + alt. `multer` memory storage enforces the size/count/mime limits before the handler; multer errors map to 400 (size) in the error handler.
+- **URL discipline**: `MediaSummary.url` is always rebuilt from `key` + `MEDIA_PUBLIC_BASE_URL` (`mediaUrlFromKey`); the stored doc has no URL field, so a stored URL can never be trusted. No raw-URL image entry exists anywhere — every image is chosen by `mediaId` through the picker.
+- **`image` node added to editor-config end to end**: `allowedNodes` gains `image` (attrs `mediaId/alt/width/height`), the validator requires a 24-hex `mediaId` and rejects content on the node, `collectImageMediaIds` walks a body for referenced ids, and the web renderer gained a matching `image` case (parity guard still holds). Stored image nodes carry only `mediaId/alt/width/height` — never `src`.
+- **src resolution at the edges**: the public detail endpoint replaces each inline image node's `mediaId` with a resolved `{src,width,height,alt}` (controlled origin), dropping `mediaId` from the public payload; the admin edit endpoint enriches image nodes with `src` while keeping `mediaId` so the editor can display them. `stripInlineImageSrc` removes `src` again — applied to **every translation body in the form's onSubmit** (not just the active editor tab), so re-saving an image-bearing article never leaks a `src` into the validated payload.
+- **Delete guard**: articles carry a derived `referencedMediaIds` array (cover + all inline image ids), recomputed on every create/update and indexed. `deleteMedia` refuses (409) if the id is any article's cover, any article's inline image, or any user's avatar; only unreferenced media are removed from R2 and Mongo.
+- **Admin UI**: a `MediaPicker` dialog (upload + paginated browse + pick) used for both the article cover and inline editor images; a standalone `/media` library page (upload, browse, delete with the guard surfaced as a 409 message), both gated (`media:upload` to view/upload, `media:manage` to delete). BFF media routes stream the multipart upload to the API with a fresh access token and enforce the size cap before forwarding; `next/image` allowlist added to the admin app.
 
 ## Decisions & deviations
 
-- Slugs are latin kebab-case by schema (`^[a-z0-9]+(?:-[a-z0-9]+)*$`) — keeps URLs portable; Devanagari titles live in `title`, not the slug.
-- Admin list serializes translations body-free (bodies stripped to `{type:"doc"}` placeholders) to keep the table light; the edit view fetches the full document.
-- Author selection UI deferred: `authorId` is the authenticated creator (Phase 8's user management can add reassignment if wanted).
-- Cover/media picking is deliberately absent — that is Phase 7's insert-by-mediaId picker; no raw-URL image path exists anywhere.
-- `dev-seed.ts` gained a `writer` fixture (article:create/edit only, phone +919999000003) to prove negative permission gating.
+- Cover selection reuses the same `MediaPicker` as inline images — one component, two mount points.
+- Inline images render with `next/image` (explicit width/height from the media doc) inside the typed walker; the src is the controlled origin, so the existing `remotePatterns` allowlist covers them with no wildcard.
+- `referencedMediaIds` is a denormalized index rather than scanning Mixed bodies at delete time — makes the guard a single indexed query and keeps deletes O(1).
+- `sharp` is marked `external` in the API's tsup build (native binary, not bundled).
 
 ## Verification (real output)
 
 `pnpm -w typecheck`: `5 successful` · `pnpm -w build`: `3 successful`.
 
-Full authoring flow over the admin BFF (editor login via OTP from the server log), against Atlas:
+Real upload → R2 → controlled-origin WebP, mime rejection, delete-then-gone (authenticated, against live R2 + Atlas):
 
 ```
-create -> 201 id=6a4bbad30f64a0170d172038 status=draft
-codeBlock body -> 400 {"error":"doc.content[0]: node type 'codeBlock' is not allowed"}
-js link -> 400 {"error":"doc.content[0].content[0].marks[0]: link href must be an absolute http or https url"}
-duplicate slug -> 409 {"error":"slug 'shiksha-budget-vriddhi' is already used by another article in language 'hi'"}
-publish -> 200 status=published publishedAt=2026-07-06T14:25:25.697Z
-update -> 200 languages=hi+en
-hi title: शिक्षा बजट में बड़ी वृद्धि
-en title: Major increase in education budget
+upload -> 201 {"id":"6a4bc449a1d516b9f6375ff3","url":"https://pub-…r2.dev/media/2026/87bbc163-….webp","alt":"verification image","width":900,"height":600,"kind":"image",...}
+served url -> 200 content-type: image/webp host: pub-aa65b5478f16452289b7209ad7e2c7f6.r2.dev
+text/plain upload -> 400 {"error":"no file uploaded"}
+delete unreferenced -> 200 {"ok":true}
+served url after delete -> 404
 ```
 
-Permission gating (server-side, not just UI):
+Cover + inline image on one article, then the delete guard:
 
 ```
-writer publish -> 403 error=forbidden   (writer role: article:create/edit only)
-writer can list -> 200 total=4
-no token -> 401                          (direct GET /admin/articles)
-articles list page -> 200 has-heading=True
+article with cover+inline -> 201 id: 6a4bc44fa1d516b9f6376005
+delete referenced media -> 409 {"error":"media is referenced by an article cover, inline image, or author avatar"}
 ```
 
-Published article live on the public site (heading, bold, list, blockquote, link, switcher):
+Inline-image src resolution (edit view keeps mediaId + adds src; public view resolves to the controlled origin and drops mediaId):
 
 ```
-hindi title: True
-heading node: True
-bold text: True
-list item: True
-blockquote: True
-sanitized link: True
-switcher to en: True
-english title via ?lang=en: True
-english heading: True
-english slug resolves: 200
+edit-view image node has src (enriched): true keeps mediaId: true
+public image node resolved src: https://pub-…r2.dev/media/2026/6bb98492-….webp
+public image has no mediaId leak: true
+public image dims: 900x600
+cleanup: article deleted, media delete after article removal -> 200
 ```
 
-Types-live proof (set `status: "archived"` in the admin serializer, then reverted):
+Edit-then-save of an image-bearing article (the flow the build reviewer flagged as untested), showing the form-level strip works and the validator still guards:
 
 ```
-src/services/article-admin.service.ts(35,5): error TS2322: Type '"archived"' is not assignable to type '"draft" | "published"'.
+create with inline image -> 201
+edit view image has src: true mediaId: true
+re-save enriched-then-stripped body -> 200
+re-save WITHOUT stripping (should 400) -> 400 {"error":"doc.content[1]: attr 'src' is not allowed"}
+cleanup done
 ```
 
-Secret hygiene: `git ls-files` filtered for `.env` → `.env.example` only.
+Types-live proof (set `MediaSummary.width` to `String(doc.width)` in the serializer, then reverted):
+
+```
+src/services/media.service.ts(30,5): error TS2322: Type 'string' is not assignable to type 'number'.
+```
+
+Secret hygiene: `git ls-files` filtered for `.env` → `.env.example` only. R2 secret access key is read from env only; the `*.r2.dev` public host in output is the reader-facing serving origin (no credential).
 
 ## Watch-outs
 
-- An early verification run authored Devanagari through PowerShell's `Invoke-WebRequest`, which mangled some UTF-8; the content was re-put via a Node client (output above). Lesson recorded: drive JSON-with-Devanagari verification through Node, not PS 5.1.
-- Unpublish shares the publish handler (`makeStatusHandler("draft")`) and permission; verified implicitly by the publish path and the writer 403.
-- Deleting an article does not yet guard against nothing — media delete guards arrive in Phase 7; category/tag deletion doesn't exist yet (Phase 8 scope note).
-- Editor's TipTap StarterKit ships input rules for markdown-ish shortcuts of disallowed nodes disabled implicitly (extensions off); if a new node is ever allowed, editor + renderer + validator all update from the one allow-list.
+- The public serving origin is `MEDIA_PUBLIC_BASE_URL` (a `*.r2.dev` dev domain); a custom media domain should replace it before production (already flagged in Phase 3).
+- Deleting an article does not delete its media (media are reusable); orphan media accumulate — a future sweep/GC could reclaim media with zero references, out of scope now.
+- The delete guard depends on `referencedMediaIds` being recomputed on write; all write paths (create/update) do so, and older seed articles (created before this field) default to `[]` — re-saving them repopulates it. The Phase 9 seed writes the field directly.
 
 ## Reviews
 
-- build-reviewer: issues-fixed — all deliverables and HANDOFF authenticity verified against uncached runs (error strings character-exact, types-live line/col confirmed, no AI-translation code). Two defects fixed: (1) toolbar lacked an H4 button despite `allowedHeadingLevels` including 4 — heading buttons are now derived from `allowedHeadingLevels` so the toolbar cannot drift from the config; (2) the BFF list route now `safeParse`s its query and returns 400 instead of 500 on crafted params.
-- security-reviewer: issues-fixed — write-path validation coverage, link-protocol enforcement, zod-gated Mongo keys (runtime-confirmed `$where`/`__proto__` translation keys are rejected), RBAC per route, BFF token confinement, and DoS caps all clean. Two low advisories applied: (1) per-language slug indexes are now `unique, sparse` with duplicate-key errors mapped to the 409 path, closing the check-then-write race; (2) the validator now rejects unknown `attrs` on nodes and marks (per-type attr allow-lists, primitive-only values, length caps, `orderedList.start` bounded) — verified: typical TipTap output passes, `{"onClick":"alert(1)"}` and nested junk attrs are rejected.
+- build-reviewer: issues-fixed — deliverables, wiring, parity, and HANDOFF authenticity all verified against uncached runs. One BLOCKING defect fixed: re-saving an article with inline images 400'd because `stripInlineImageSrc` only ran on the editor's `onUpdate`, never for the initial enriched body or non-active language tabs. It now runs over every translation body in the form's `onSubmit`; re-verified live (enriched-then-stripped re-save → 200, unstripped → 400). Minor defect fixed: removed the unused `getMediaSummaries` export (annotate-as-you-consume).
+- security-reviewer: PASS — secrets, layered upload validation (multer + sharp content-sniff + BFF size check), URL-from-key discipline, exact-host image allowlists, mediaId-only persistence, DB-resolved RBAC, delete guard, and no-SSRF all clean. Two low advisories applied: `sharp` now sets `limitInputPixels: 30_000_000` (decompression-bomb bound), and the editor's image node discards any pasted `src` at parse time (`parseHTML: () => null`) as belt-and-suspenders over the server validator.
 
 ## Next step
 
-Phase 7 — media library: R2 upload pipeline (mime allowlist, size cap, sharp dims, WebP re-encode), media browser + insert-by-mediaId picker (cover + inline image, which adds the `image` node to editor-config end to end), delete guard for referenced covers.
+Phase 8 — users & roles: staff CRUD (create with phone+roles → immediate OTP login), role assignment, soft deactivate, roles CRUD over the permission catalogue, self-lockout guards (last admin, self-deprivilege), server-enforced.
