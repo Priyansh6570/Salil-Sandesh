@@ -123,6 +123,26 @@ export interface Media {
   updatedAt: string;
 }
 
+export interface ApiError {
+  error: string;
+}
+
+export interface OtpRequestAck {
+  message: string;
+}
+
+export interface TokenPairResponse {
+  accessToken: string;
+  refreshToken: string;
+}
+
+export interface MeResponse {
+  id: string;
+  name: string;
+  roles: string[];
+  permissions: Permission[];
+}
+
 export interface RefreshTokenRecord {
   id: string;
   userId: string;

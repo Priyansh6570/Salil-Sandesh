@@ -1,74 +1,96 @@
-# HANDOFF — Phase 1: Data models + shared types
+# HANDOFF — Phase 2: Auth (OTP + rotating refresh + RBAC)
 
 ## What I built
 
-- `packages/shared` now carries the full type contract: runtime catalogues (`languageCodes` with `hi` default, `userStatuses`, `articleStatuses`, `mediaKinds`, `refreshTokenStatuses`, `permissionCatalogue` of 10 permissions) plus wire types `User`, `Role`, `Article`/`ArticleTranslation`/`ArticleFlags`, `Category`, `Tag`, `Media`, `RefreshTokenRecord`, and generic `TipTapNode`/`TipTapMark`.
-- `apps/api/src/models/`: seven Mongoose schemas (`user`, `role`, `article`, `category`, `tag`, `media`, `refresh-token`) with a barrel `index.ts`. Schema enums are built FROM the shared runtime catalogues, so enum drift between API and frontends is a compile error.
-- Article schema: `translations` as a `Map` of per-language subdocuments `{ title, excerpt, slug, body (Mixed TipTap JSON) }`; map keys validated against `languageCodes`; a pre-validate hook rejects any article lacking a translation for its `defaultLanguage`; shared fields (category, author, tags, cover, flags, status, publishedAt) live on the article.
-- Uniqueness via indexes: `user.phone`, `user.slug`, `role.name`, `category.slug`, `tag.slug`, `media.key`, `refreshToken.tokenHash`; lookup indexes on `refreshToken.userId` and `familyId`.
-- Verification script `apps/api/src/scripts/model-roundtrip.ts`: creates one of each document against Atlas, reads the article back, asserts four validation rejections, cleans up after itself. Hardened per security review: a negative check that unexpectedly succeeds now deletes the stray document and exits non-zero, and cleanup runs in a `finally` so midway crashes don't leak test documents.
+- **OTP flow** (`services/otp.service.ts`): request resolves an active staff user by phone, mints a `crypto.randomInt` code, stores only its **HMAC-SHA256 hash** (keyed server-side, so a 6-digit code can't be reversed from a DB dump) in a Mongo `otps` collection (TTL-indexed on `expiresAt`), and prints the code to the server log (dev delivery, no SMS). No-enumeration is response-identical AND cost-identical: the unknown-phone branch performs an equivalent decoy upsert so both paths do one read + one write (security-review fix). The upsert races on the unique phone index fall back to a plain update. Verify uses an atomic `findOneAndUpdate` that enforces expiry and a 5-attempt cap while incrementing attempts, compares hashes with `crypto.timingSafeEqual` (against a decoy hash when no OTP exists), and consumes the OTP on success.
+- **Sessions** (`services/token.service.ts`): HS256 access JWT (`expiresIn` from `JWT_ACCESS_TTL`, parsed to seconds at env validation) + opaque 48-byte refresh tokens stored as sha256 hashes with a `familyId`. Rotation marks the old record `rotated` atomically and issues a new token in the same family; presenting a non-active (replayed) or expired token, or racing a concurrent rotation, **revokes the entire family**. Logout revokes the family. Refresh-token TTL index keys off `expiresAt` only, so `rotated`/`revoked` records survive for reuse detection.
+- **RBAC** (`middleware/auth.ts`, `services/permission.service.ts`): `requireAuth` verifies the JWT (algorithm pinned to HS256); `requirePermissions(...)` re-resolves the user's roles → permissions from the DB on every request (revocation is immediate; blocked users fail closed). `GET /auth/me` returns `{ id, name, roles, permissions }` as shared `MeResponse`.
+- **Rate limiting** (`middleware/rate-limit.ts`): Mongo-backed fixed-window counters (TTL-cleaned), applied per-IP AND per-phone on both `/auth/otp/request` (10/ip, 3/phone per 5 min) and `/auth/otp/verify` (15/ip, 5/phone per 5 min); 429 with `Retry-After`.
+- **Validation & errors**: zod `validateBody` on every auth route (E.164 phone, digit-only code, bounded refresh token), JSON body limit 1mb, JSON error handler that never leaks stack traces.
+- **Bootstrap script** `scripts/ensure-admin.ts`: idempotently creates the system-locked `admin` role (all 10 catalogue permissions) and an admin user for a given phone.
+- Shared types added: `ApiError`, `OtpRequestAck`, `TokenPairResponse`, `MeResponse`.
 
 ## Decisions & deviations
 
-- Language codes are a curated const list (`hi en bn gu mr pa ta te ur`) rather than free strings — adding a language is a one-line shared change; keeps editor tabs, fallback logic, and map-key validation typed.
-- `RefreshToken` got `tokenHash` and `expiresAt` beyond the spec's minimum ("user, family id, rotated/active state") because rotation in Phase 2 is impossible without them; nothing else was added ahead of need.
-- Doc→wire field parity (ObjectId→string, Date→ISO) locks in when Phase 3 serializers return shared types from documents; today the shared runtime catalogues are the enforced drift guard (proven below).
+- `REDIS_URL` is blank, so OTP and rate-limit state live in Mongo (TTL indexes) as the kickoff's stated fallback; swapping to Redis later only replaces the two storage touchpoints.
+- `requirePermissions` ships now (part of the phase's RBAC deliverable) but its first route consumers arrive with the write paths (Phase 6/8); its resolution path is the same `resolveUserAccess` proven live via `/auth/me`, and its permission-name type safety is proven below.
+- No `trust proxy` set: `req.ip` is the socket address, so the IP rate limit cannot be spoofed via `X-Forwarded-For` in dev. Set `trust proxy` appropriately at deployment behind a proxy (noted for the deploy phase).
+- Test admin seeded with dummy phone `+919999000001` (OTP comes from the log, so no real SMS number is needed).
 
 ## Verification (real output)
 
-`pnpm -w typecheck`: `Tasks: 5 successful, 5 total` · `pnpm -w build`: `Tasks: 3 successful, 3 total, Time: 15.147s`.
+`pnpm -w typecheck`: `Tasks: 5 successful, 5 total` · `pnpm -w build`: `Tasks: 3 successful, 3 total, Time: 13.666s`.
 
-Round-trip against Atlas (`tsx src/scripts/model-roundtrip.ts`, re-run after hardening):
-
-```
-roundtrip connected to salil_sandesh
-{
-  "articleId": "6a4b9a791ed61e0ccafdcbc8",
-  "defaultLanguage": "hi",
-  "translationLanguages": [
-    "hi",
-    "en"
-  ],
-  "hindiTitle": "जल संरक्षण पर विशेष रिपोर्ट",
-  "englishTitle": "Special report on water conservation",
-  "bodyNodeType": "doc",
-  "status": "draft",
-  "isBreaking": true,
-  "categoryId": "6a4b9a791ed61e0ccafdcbc2",
-  "authorId": "6a4b9a791ed61e0ccafdcbbd",
-  "tagIds": [
-    "6a4b9a791ed61e0ccafdcbc4"
-  ],
-  "coverMediaId": "6a4b9a791ed61e0ccafdcbc6",
-  "refreshTokenStatus": "active"
-}
-article with unsupported language key: rejected -> Article validation failed: translations: translations must be non-empty and keyed by supported language codes
-article missing default-language translation: rejected -> missing translation for default language hi
-role with unknown permission: rejected -> Role validation failed: permissions.0: `article:fly` is not a valid enum value for path `permissions.0`.
-user with invalid status: rejected -> User validation failed: status: `asleep` is not a valid enum value for path `status`.
-roundtrip cleanup complete (7 documents removed)
-```
-
-Types-live proof (changed the user schema default to `"activee" satisfies UserStatus`, then reverted):
+Seed + boot against Atlas:
 
 ```
-src/models/user.model.ts(13,26): error TS1360: Type '"activee"' does not satisfy the expected type '"active" | "blocked"'.
+{"role":"admin","rolePermissions":10,"userId":"6a4b9be005f4694c0bacec69","userName":"Administrator","userStatus":"active"}
+connected to mongodb database salil_sandesh
+api listening on 0.0.0.0:4000
+[otp] delivery for +919999000001: 839782
 ```
 
-Secret hygiene: `git ls-files` filtered for `.env` → `.env.example` only.
+No-enumeration (identical bodies for known and unknown phone):
+
+```
+known-phone response: {"message":"if the phone is registered, a code has been sent"}
+unknown-phone response: {"message":"if the phone is registered, a code has been sent"}
+```
+
+Login end to end (code taken from the server log):
+
+```
+wrong code -> 401 {"error":"invalid phone or code"}
+verify ok -> access: eyJhbGciOiJIUzI1NiIsInR5c... refresh: aYPRQnAisvt_... (len 64)
+me -> {"id":"6a4b9be005f4694c0bacec69","name":"Administrator","roles":["admin"],"permissions":["article:create","article:edit","article:publish","article:delete","media:upload","media:manage","category:manage","tag:manage","user:manage","role:manage"]}
+```
+
+Rotation, reuse detection, family revoke:
+
+```
+rotation -> old: aYPRQnAisvt_... new: -UDyV_jZB5_e... (different: True)
+replay of rotated-out token -> 401 {"error":"invalid refresh token"}
+post-reuse: NEW token also -> 401 {"error":"invalid refresh token"} (family revoked)
+```
+
+Rate limit (3/phone per 5 min; one request already spent in the window above), auth guard, input validation:
+
+```
+request 1 -> 200
+request 2 -> 200
+request 3 -> 429 {"error":"too many requests"}
+request 4 -> 429 {"error":"too many requests"}
+request 5 -> 429 {"error":"too many requests"}
+me without token -> 401
+malformed phone -> 400 {"error":"invalid request body"}
+```
+
+Types-live proof (added `requirePermissions("article:fly")` to a route, then reverted):
+
+```
+src/routes/auth.routes.ts(49,63): error TS2345: Argument of type '"article:fly"' is not assignable to parameter of type '"article:create" | "article:edit" | "article:publish" | "article:delete" | "media:upload" | "media:manage" | "category:manage" | "tag:manage" | "user:manage" | "role:manage"'.
+```
+
+Post-review hardening re-verified live (fresh boot, code `736097` from the log; decoy write for the unknown phone produced no log line and no login path):
+
+```
+hardened login ok -> Administrator roles=admin perms=10
+decoy-phone verify -> 401 {"error":"invalid phone or code"}
+```
+
+Secret hygiene: `git ls-files` filtered for `.env` → `.env.example` only. OTP codes appear ONLY in the server log, never in responses; refresh tokens are stored as sha256 hashes and OTP codes as server-keyed HMAC-SHA256 hashes.
 
 ## Watch-outs
 
-- `translations` map slugs are not globally unique at the schema level (dynamic keys can't carry a Mongo unique index); per-language slug uniqueness gets enforced in the article service when writes are built (Phase 6), and slug lookup indexes (`translations.hi.slug` etc.) get added in Phase 3 with the read paths.
-- `body` is `Schema.Types.Mixed` — deep-change tracking requires `markModified("translations")` on nested body edits; editor-config validation of body content arrives with the write path (Phase 6).
-- Blank `.env` values still pending for Phase 2: `JWT_ACCESS_SECRET`, `ADMIN_SESSION_SECRET`, `SECRETS_ENC_KEY`.
-- Phase 2 note from security review: any TTL index on refresh tokens must key off `expiresAt` only — `rotated`/`revoked` records must survive long enough for family reuse detection.
+- Access JWT carries only `sub` (user id); roles/permissions are always DB-resolved, so a role edit or user block takes effect on the next request, not at token expiry.
+- Per-phone rate-limit keys are derived from the zod-validated E.164 phone, so the key space can't be polluted with arbitrary strings; IP keys use the raw socket address until `trust proxy` is configured at deployment.
+- The seeded `+919999000001` admin is for dev verification; Phase 9's seed creates the real staff set, and any phone can be promoted via `ensure-admin`.
 
 ## Reviews
 
-- build-reviewer: issues-fixed — all deliverables, drift guard, index set, and verification authenticity confirmed (roundtrip ObjectIds and validator strings cross-checked against sources; types-live line/col reproduced empirically). Two minor defects fixed: `media.alt` had contradictory `required: true` + `default: ""` (required dropped — alt may be empty); round-trip paste in this handoff corrected to verbatim multi-line JSON output.
-- security-reviewer: issues-fixed — secrets hygiene clean, refresh tokens stored as `tokenHash` only, permissions/status/language enums closed. Low finding fixed: the round-trip's negative checks now exit non-zero (and delete the stray doc) if a validator regresses, and cleanup runs in `finally`. TTL advisory recorded in Watch-outs.
+- build-reviewer: issues-fixed — deliverables, wiring, rate-limit numbers, HANDOFF authenticity (string-level cross-check, token length/format, ObjectId timestamps) all verified against uncached typecheck/build runs. One defect fixed: `ApiError` had no consumer; every error send site now carries `satisfies ApiError`, binding the shared error shape at compile time.
+- security-reviewer: issues-fixed — secrets, OTP hygiene, rotation/reuse-detection (including the concurrent-rotation race failing safe), JWT algorithm pinning, DB-resolved RBAC, and injection surfaces all clean. Three findings fixed: (1) medium — unknown-phone OTP requests now perform an equivalent decoy DB write, closing the timing side-channel on enumeration; (2) low — OTP hashes are now HMAC-SHA256 keyed with a server secret instead of bare sha256 of a 10^6 code space; (3) low — the OTP upsert duplicate-key race now falls back to an update instead of throwing 500. Advisories recorded: set `trust proxy` to the exact hop count at deployment; malformed bodies 400 before touching rate-limit counters (accepted).
 
 ## Next step
 
-Phase 2 — OTP auth (log-delivered codes, no-enumeration, per-phone + per-IP rate limits), access JWT + rotating refresh with family reuse detection, DB-resolved permission middleware, `GET /auth/me`.
+Phase 3 — public read API: site config, categories, tags, article list/detail/by-author/by-tag/by-category with centralised `?lang=` fallback, search, batch author/cover resolution onto cards.

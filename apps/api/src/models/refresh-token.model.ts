@@ -17,5 +17,7 @@ const refreshTokenSchema = new Schema(
   { timestamps: true }
 );
 
+refreshTokenSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+
 export type RefreshTokenDoc = InferSchemaType<typeof refreshTokenSchema>;
 export const RefreshTokenModel = model("RefreshToken", refreshTokenSchema);
