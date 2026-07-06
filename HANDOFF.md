@@ -1,81 +1,75 @@
-# HANDOFF — Phase 7: Media library (R2)
+# HANDOFF — Phase 8: Users & roles
 
 ## What I built
 
-- **Upload pipeline** (`apps/api/src/services/media.service.ts`): mime allowlist (jpeg/png/webp/gif/avif), 8 MB size cap, `sharp` reads real dimensions (fails closed if unreadable), auto-rotates by EXIF, downscales to ≤2400px longest edge, and **re-encodes every upload to WebP** (quality 82). Stored in R2 under `media/<year>/<uuid>.webp` with a 1-year immutable cache header; a Media doc records key + dimensions + alt. `multer` memory storage enforces the size/count/mime limits before the handler; multer errors map to 400 (size) in the error handler.
-- **URL discipline**: `MediaSummary.url` is always rebuilt from `key` + `MEDIA_PUBLIC_BASE_URL` (`mediaUrlFromKey`); the stored doc has no URL field, so a stored URL can never be trusted. No raw-URL image entry exists anywhere — every image is chosen by `mediaId` through the picker.
-- **`image` node added to editor-config end to end**: `allowedNodes` gains `image` (attrs `mediaId/alt/width/height`), the validator requires a 24-hex `mediaId` and rejects content on the node, `collectImageMediaIds` walks a body for referenced ids, and the web renderer gained a matching `image` case (parity guard still holds). Stored image nodes carry only `mediaId/alt/width/height` — never `src`.
-- **src resolution at the edges**: the public detail endpoint replaces each inline image node's `mediaId` with a resolved `{src,width,height,alt}` (controlled origin), dropping `mediaId` from the public payload; the admin edit endpoint enriches image nodes with `src` while keeping `mediaId` so the editor can display them. `stripInlineImageSrc` removes `src` again — applied to **every translation body in the form's onSubmit** (not just the active editor tab), so re-saving an image-bearing article never leaks a `src` into the validated payload.
-- **Delete guard**: articles carry a derived `referencedMediaIds` array (cover + all inline image ids), recomputed on every create/update and indexed. `deleteMedia` refuses (409) if the id is any article's cover, any article's inline image, or any user's avatar; only unreferenced media are removed from R2 and Mongo.
-- **Admin UI**: a `MediaPicker` dialog (upload + paginated browse + pick) used for both the article cover and inline editor images; a standalone `/media` library page (upload, browse, delete with the guard surfaced as a 409 message), both gated (`media:upload` to view/upload, `media:manage` to delete). BFF media routes stream the multipart upload to the API with a fresh access token and enforce the size cap before forwarding; `next/image` allowlist added to the admin app.
+- **Staff CRUD** (`apps/api/src/services/user-admin.service.ts`, `/admin/users`): list, create (name + phone + roles → the user can OTP-login immediately, since auth resolves staff by phone), update (name/roles/bio), and soft deactivate/reactivate via `/users/:id/status`. There is deliberately **no hard delete** — deactivation is the soft-delete, matching the auth model (blocked users fail OTP verify and lose sessions on the next DB-resolved request). Slugs are generated from name + phone suffix; phone uniqueness → 409.
+- **Roles CRUD** (`services/role-admin.service.ts`, `/admin/roles`): list, create, update, delete over the permission catalogue. `GET /admin/permissions` serves the catalogue grouped for the UI. System-locked roles (the seeded `admin`) reject edit and delete (409); a role assigned to any user cannot be deleted (409).
+- **Self-lockout guards** (server-side, in the service layer — not UI):
+  - You cannot remove your own administrator capability (self-deprivilege) or deactivate your own account.
+  - The **last administrator** cannot be deprivileged or deactivated, even by another manager. "Administrator" is defined as holding **`role:manage`** (the privilege-granting permission — the one capability the system must never lose its last holder of); the guard counts *other active* `role:manage` holders and blocks the write when that count is zero.
+  - The same invariant is enforced at the **role-edit** path: stripping `role:manage` from a role that has active users, when no other admin-granting role has an active user, is rejected (`LastAdminRoleError` → 409). This closes the bypass where an admin could otherwise neutralize all administration by editing the sole admin role instead of a user.
+- **RBAC**: all `/admin/users` routes require `user:manage`, all `/admin/roles` + `/admin/permissions` require `role:manage`, resolved from the DB per request. The admin UI (`/users`, `/roles` pages, gated shell nav) mirrors this for UX only.
+- **Admin UI**: `/users` (create form with role toggles, table with role badges, status, activate/deactivate) and `/roles` (create/edit form with catalogue permissions grouped by area, list with system-lock badges and edit/delete), both over the session-resealing BFF (`/api/bff/users`, `/api/bff/roles`, `/api/bff/permissions`), all ids ObjectId-checked before proxying.
+- Shared types added: `UserSummary`, `RoleRef`, `RoleSummary`, `PermissionCatalogueEntry` — consumed by both API serializers and the admin components.
 
 ## Decisions & deviations
 
-- Cover selection reuses the same `MediaPicker` as inline images — one component, two mount points.
-- Inline images render with `next/image` (explicit width/height from the media doc) inside the typed walker; the src is the controlled origin, so the existing `remotePatterns` allowlist covers them with no wildcard.
-- `referencedMediaIds` is a denormalized index rather than scanning Mixed bodies at delete time — makes the guard a single indexed query and keeps deletes O(1).
-- `sharp` is marked `external` in the API's tsup build (native binary, not bundled).
+- "Admin" = `role:manage` holder (not `user:manage`). Rationale: `role:manage` is the ability to grant/revoke any permission; losing its last holder is the true unrecoverable lockout. This also makes the last-admin guard reachable and testable by a `user:manage`-only manager (proven below), rather than being redundant with the self guard.
+- Self-deprivilege guard targets the admin (`role:manage`) capability specifically — the critical lockout — plus a blanket block on self-deactivation.
+- User update replaces the full role set (assignment is idempotent); role update replaces the full permission set.
+- No hard-delete endpoint for users (soft deactivate only), per the security model; the seeded test/manager users from verification remain as inert deactivated/reassigned accounts.
 
 ## Verification (real output)
 
 `pnpm -w typecheck`: `5 successful` · `pnpm -w build`: `3 successful`.
 
-Real upload → R2 → controlled-origin WebP, mime rejection, delete-then-gone (authenticated, against live R2 + Atlas):
+End-to-end against Atlas (admin OTP-login, code from server log; the created user then OTP-logs in themselves):
 
 ```
-upload -> 201 {"id":"6a4bc449a1d516b9f6375ff3","url":"https://pub-…r2.dev/media/2026/87bbc163-….webp","alt":"verification image","width":900,"height":600,"kind":"image",...}
-served url -> 200 content-type: image/webp host: pub-aa65b5478f16452289b7209ad7e2c7f6.r2.dev
-text/plain upload -> 400 {"error":"no file uploaded"}
-delete unreferenced -> 200 {"ok":true}
-served url after delete -> 404
+create user -> 201 roles: editor
+new user OTP-login /auth/me perms: article:create,article:edit,article:publish
+editor hits /admin/users (needs user:manage) -> 403 forbidden
+duplicate phone -> 409 a user with this phone already exists
+admin self-deprivilege -> 409 you cannot remove your own administrator role
+admin self-deactivate -> 409 you cannot deactivate your own account
+manager deprivileges the last role:manage admin -> 409 cannot remove the administrator role from the last admin
+manager deactivates the last admin -> 409 cannot deactivate the last admin
+deactivate editor -> 200 status: blocked
+blocked user can OTP-login: false (should be false)
+delete role assigned to users -> 409 cannot delete a role that is assigned to users
+edit system-locked admin role -> 409 system roles cannot be modified
+create role -> 201 perms: tag:manage
+delete unused role -> 200
 ```
 
-Cover + inline image on one article, then the delete guard:
+Role-edit last-admin guard (added per security review), staged live so role R is the sole active admin-granting role, then relaxed:
 
 ```
-article with cover+inline -> 201 id: 6a4bc44fa1d516b9f6376005
-delete referenced media -> 409 {"error":"media is referenced by an article cover, inline image, or author avatar"}
+U deactivates seed admin (allowed, U is another admin) -> 200
+strip role:manage from R while it is the SOLE active admin role -> 409 cannot remove administrator access from the last role that grants it
+cleanup: seed admin reactivated -> 200
+strip role:manage from R while seed admin active again -> 200 (200 = allowed, another admin exists)
 ```
 
-Inline-image src resolution (edit view keeps mediaId + adds src; public view resolves to the controlled origin and drops mediaId):
+Types-live proof (set `RoleSummary.systemLocked` to a string in the serializer, then reverted):
 
 ```
-edit-view image node has src (enriched): true keeps mediaId: true
-public image node resolved src: https://pub-…r2.dev/media/2026/6bb98492-….webp
-public image has no mediaId leak: true
-public image dims: 900x600
-cleanup: article deleted, media delete after article removal -> 200
+src/services/role-admin.service.ts(37,5): error TS2322: Type 'string' is not assignable to type 'boolean'.
 ```
 
-Edit-then-save of an image-bearing article (the flow the build reviewer flagged as untested), showing the form-level strip works and the validator still guards:
-
-```
-create with inline image -> 201
-edit view image has src: true mediaId: true
-re-save enriched-then-stripped body -> 200
-re-save WITHOUT stripping (should 400) -> 400 {"error":"doc.content[1]: attr 'src' is not allowed"}
-cleanup done
-```
-
-Types-live proof (set `MediaSummary.width` to `String(doc.width)` in the serializer, then reverted):
-
-```
-src/services/media.service.ts(30,5): error TS2322: Type 'string' is not assignable to type 'number'.
-```
-
-Secret hygiene: `git ls-files` filtered for `.env` → `.env.example` only. R2 secret access key is read from env only; the `*.r2.dev` public host in output is the reader-facing serving origin (no credential).
+Secret hygiene: `git ls-files` filtered for `.env` → `.env.example` only.
 
 ## Watch-outs
 
-- The public serving origin is `MEDIA_PUBLIC_BASE_URL` (a `*.r2.dev` dev domain); a custom media domain should replace it before production (already flagged in Phase 3).
-- Deleting an article does not delete its media (media are reusable); orphan media accumulate — a future sweep/GC could reclaim media with zero references, out of scope now.
-- The delete guard depends on `referencedMediaIds` being recomputed on write; all write paths (create/update) do so, and older seed articles (created before this field) default to `[]` — re-saving them repopulates it. The Phase 9 seed writes the field directly.
+- The last-admin guard hinges on `role:manage` being the admin marker. If a future role model renames or splits that permission, update `adminPermission` in `user-admin.service.ts` (single constant).
+- Deactivating a user does not proactively revoke their refresh-token families; their access is cut on the next request because permissions/status are DB-resolved and OTP verify checks `status: active`. A background family-revoke on deactivate could be added later if instant session kill is required.
+- Verification left a test staff user and an ex-manager (reassigned to editor) in Atlas — inert; Phase 9's seed is the authoritative staff set and is idempotent.
 
 ## Reviews
 
-- build-reviewer: issues-fixed — deliverables, wiring, parity, and HANDOFF authenticity all verified against uncached runs. One BLOCKING defect fixed: re-saving an article with inline images 400'd because `stripInlineImageSrc` only ran on the editor's `onUpdate`, never for the initial enriched body or non-active language tabs. It now runs over every translation body in the form's `onSubmit`; re-verified live (enriched-then-stripped re-save → 200, unstripped → 400). Minor defect fixed: removed the unused `getMediaSummaries` export (annotate-as-you-consume).
-- security-reviewer: PASS — secrets, layered upload validation (multer + sharp content-sniff + BFF size check), URL-from-key discipline, exact-host image allowlists, mediaId-only persistence, DB-resolved RBAC, delete guard, and no-SSRF all clean. Two low advisories applied: `sharp` now sets `limitInputPixels: 30_000_000` (decompression-bomb bound), and the editor's image node discards any pasted `src` at parse time (`parseHTML: () => null`) as belt-and-suspenders over the server validator.
+- build-reviewer: PASS — deliverables, wiring, DB-per-request RBAC, self-lockout/last-admin ordering, shared-type consumption, and all seven HANDOFF error strings verified verbatim against source; typecheck/build green; no comments, no scope creep.
+- security-reviewer: issues-fixed — RBAC coverage, trustworthy actor identity (JWT `sub`, never client-supplied), user-layer self-lockout/last-admin guards, enum-constrained permissions, and BFF confinement all clean. One Medium finding fixed: `updateRole` could strip `role:manage` from the sole admin role, bypassing the last-admin invariant; added a guard (`LastAdminRoleError` → 409) and proved it live (block when sole, allow when another admin exists). Accepted notes: `role:manage` is by definition full self-escalation (intended admin power); the lowercase-hex ObjectId regex fails closed on uppercase input (all ids originate from our own lowercase API); `dev-seed` seeds no admin (the OTP-loginable admin is bootstrapped by `ensure-admin` / Phase 9 seed).
 
 ## Next step
 
-Phase 8 — users & roles: staff CRUD (create with phone+roles → immediate OTP login), role assignment, soft deactivate, roles CRUD over the permission catalogue, self-lockout guards (last admin, self-deprivilege), server-enforced.
+Phase 9 — seed + finalize: idempotent NewsData.io-driven seed (~40 Hindi articles with generated TipTap bodies, some manual English translations, ~6 staff across roles, one OTP-loginable admin), then a final full-app review pass.

@@ -12,6 +12,17 @@ import {
   handleListMedia,
   handleUploadMedia,
 } from "../controllers/media.controller";
+import {
+  handleCreateRole,
+  handleCreateUser,
+  handleDeleteRole,
+  handleListRoles,
+  handleListUsers,
+  handlePermissionCatalogue,
+  handleSetUserStatus,
+  handleUpdateRole,
+  handleUpdateUser,
+} from "../controllers/admin-user.controller";
 import { requireAuth, requirePermissions } from "../middleware/auth";
 import { uploadImageMiddleware } from "../middleware/upload";
 import { asyncHandler } from "../utils/async-handler";
@@ -66,3 +77,16 @@ adminRouter.delete(
   requirePermissions("media:manage"),
   asyncHandler(handleDeleteMedia)
 );
+
+const manageUsers = requirePermissions("user:manage");
+adminRouter.get("/users", manageUsers, asyncHandler(handleListUsers));
+adminRouter.post("/users", manageUsers, asyncHandler(handleCreateUser));
+adminRouter.put("/users/:id", manageUsers, asyncHandler(handleUpdateUser));
+adminRouter.post("/users/:id/status", manageUsers, asyncHandler(handleSetUserStatus));
+
+const manageRoles = requirePermissions("role:manage");
+adminRouter.get("/permissions", manageRoles, handlePermissionCatalogue);
+adminRouter.get("/roles", manageRoles, asyncHandler(handleListRoles));
+adminRouter.post("/roles", manageRoles, asyncHandler(handleCreateRole));
+adminRouter.put("/roles/:id", manageRoles, asyncHandler(handleUpdateRole));
+adminRouter.delete("/roles/:id", manageRoles, asyncHandler(handleDeleteRole));

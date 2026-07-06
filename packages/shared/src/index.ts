@@ -216,6 +216,32 @@ export interface Paginated<T> {
   total: number;
 }
 
+export interface UserSummary {
+  id: string;
+  name: string;
+  phone: string;
+  slug: string;
+  status: UserStatus;
+  roles: RoleRef[];
+  createdAt: string;
+}
+
+export interface RoleRef {
+  id: string;
+  name: string;
+}
+
+export interface RoleSummary extends RoleRef {
+  permissions: Permission[];
+  systemLocked: boolean;
+  createdAt: string;
+}
+
+export interface PermissionCatalogueEntry {
+  key: Permission;
+  group: string;
+}
+
 export interface RefreshTokenRecord {
   id: string;
   userId: string;
