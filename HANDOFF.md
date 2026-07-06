@@ -73,11 +73,12 @@ Secret hygiene: `git ls-files` filtered for `.env` → `.env.example` only.
 - Re-seeding pulls fresh "latest" headlines; to reset to a known set, clear the `articles` collection first. Category covers, roles, staff, and tags are stable across re-runs.
 - The `*.r2.dev` public media host should be swapped for a custom domain before production (flagged since Phase 3); the seed keys are stable so covers survive the swap.
 - NewsData.io free-tier quota is limited; the seed tolerates partial fetches (uses whatever it receives up to 40).
+- Deployment: set `app.set('trust proxy', <hops>)` in `apps/api/src/app.ts` when running behind a reverse proxy so the per-IP OTP rate limiter keys off the real client IP rather than the proxy (per-phone limit and no-enumeration remain effective regardless).
 
-## Reviews
+## Reviews (final whole-app pass, Phases 0-9)
 
-- build-reviewer: pending (final whole-app pass)
-- security-reviewer: pending (final whole-app pass)
+- build-reviewer: **PASS, no defects** — `pnpm -w typecheck` 5/5 and `pnpm -w build` 3/3; zero code comments anywhere; the shared type contract and editor-config single-source (including the `image` node across config/validator/renderer/editor with compile-enforced parity) are intact with no drift; no stubs, no scope creep, AI translation correctly absent; HANDOFF reflects real Phase 9 output; all 10 phases committed and `.env` untracked.
+- security-reviewer: **PASS, no high/critical** — secrets clean and fail-fast validated; OTP no-enumeration + phone/IP rate limits + HMAC-at-rest; HS256-pinned JWT + rotating refresh with family reuse detection; BFF tokens confined to the AES-GCM httpOnly cookie; open-redirect sanitizer holds; DB-per-request RBAC with self-lockout and last-admin guards at both user and role-edit layers; editor-config body validation on every write, typed renderer with no `dangerouslySetInnerHTML`, inline images persist only `mediaId`; exact-host media allowlist; drafts and staff PII never exposed publicly. Only open items are the three already-deferred low-severity advisories (per-IP public-search rate limit, custom media domain, proactive refresh-family revoke on deactivation — access is already cut immediately via the DB status check), plus a deployment note: set `app.set('trust proxy')` appropriately when deployed behind a reverse proxy so the per-IP OTP limiter keys off the real client IP.
 
 ## Next step
 
