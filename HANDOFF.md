@@ -1,75 +1,84 @@
-# HANDOFF — Phase 8: Users & roles
+# HANDOFF — Phase 9: Seed + finalize
 
 ## What I built
 
-- **Staff CRUD** (`apps/api/src/services/user-admin.service.ts`, `/admin/users`): list, create (name + phone + roles → the user can OTP-login immediately, since auth resolves staff by phone), update (name/roles/bio), and soft deactivate/reactivate via `/users/:id/status`. There is deliberately **no hard delete** — deactivation is the soft-delete, matching the auth model (blocked users fail OTP verify and lose sessions on the next DB-resolved request). Slugs are generated from name + phone suffix; phone uniqueness → 409.
-- **Roles CRUD** (`services/role-admin.service.ts`, `/admin/roles`): list, create, update, delete over the permission catalogue. `GET /admin/permissions` serves the catalogue grouped for the UI. System-locked roles (the seeded `admin`) reject edit and delete (409); a role assigned to any user cannot be deleted (409).
-- **Self-lockout guards** (server-side, in the service layer — not UI):
-  - You cannot remove your own administrator capability (self-deprivilege) or deactivate your own account.
-  - The **last administrator** cannot be deprivileged or deactivated, even by another manager. "Administrator" is defined as holding **`role:manage`** (the privilege-granting permission — the one capability the system must never lose its last holder of); the guard counts *other active* `role:manage` holders and blocks the write when that count is zero.
-  - The same invariant is enforced at the **role-edit** path: stripping `role:manage` from a role that has active users, when no other admin-granting role has an active user, is rejected (`LastAdminRoleError` → 409). This closes the bypass where an admin could otherwise neutralize all administration by editing the sole admin role instead of a user.
-- **RBAC**: all `/admin/users` routes require `user:manage`, all `/admin/roles` + `/admin/permissions` require `role:manage`, resolved from the DB per request. The admin UI (`/users`, `/roles` pages, gated shell nav) mirrors this for UX only.
-- **Admin UI**: `/users` (create form with role toggles, table with role badges, status, activate/deactivate) and `/roles` (create/edit form with catalogue permissions grouped by area, list with system-lock badges and edit/delete), both over the session-resealing BFF (`/api/bff/users`, `/api/bff/roles`, `/api/bff/permissions`), all ids ObjectId-checked before proxying.
-- Shared types added: `UserSummary`, `RoleRef`, `RoleSummary`, `PermissionCatalogueEntry` — consumed by both API serializers and the admin components.
+- **Idempotent seed** (`apps/api/src/scripts/seed/`, run with `pnpm --filter @salil-sandesh/api seed`):
+  - **Roles**: `admin` (all permissions, system-locked), `editor`, `author`, `writer`, `photographer` — upserted by name.
+  - **Staff**: 6 users upserted **by phone** (the unique login key, so the seed consolidates any pre-existing accounts): an OTP-loginable admin at **`+919999000001`** plus editor/author/writer/photographer staff, all active.
+  - **Categories**: 8 Hindi sections (प्रमुख, राष्ट्रीय, विश्व, व्यापार, खेल, मनोरंजन, तकनीक, स्वास्थ्य), each with a generated **R2-hosted cover** placeholder (category-coloured WebP with the section name, uploaded under a deterministic `seed/covers/<slug>.webp` key and upserted as a Media doc — idempotent, and served through the `next/image` allowlist).
+  - **Articles**: ~40 **real Hindi headlines** pulled live from NewsData.io (`country=in&language=hi`), mapped to sections by the provider's category, each given a **coherent generated Hindi TipTap body** (lead paragraph from the real description, a "मुख्य बिंदु" heading, a bulleted list, a blockquote — all within editor-config), a round-robin author, two tags, the section cover, and flags (first two breaking, first six featured). Every seventh article also gets a **manual English translation** to exercise the language switcher. Slugs are latin, transliterated from the title with a stable article-id suffix, so re-seeding the same headline upserts rather than duplicates.
+- **Media reference integrity**: seeded articles set `referencedMediaIds` (cover + any inline images) directly, so the Phase 7 delete guard protects seed covers immediately.
 
 ## Decisions & deviations
 
-- "Admin" = `role:manage` holder (not `user:manage`). Rationale: `role:manage` is the ability to grant/revoke any permission; losing its last holder is the true unrecoverable lockout. This also makes the last-admin guard reachable and testable by a `user:manage`-only manager (proven below), rather than being redundant with the self guard.
-- Self-deprivilege guard targets the admin (`role:manage`) capability specifically — the critical lockout — plus a blanket block on self-deactivation.
-- User update replaces the full role set (assignment is idempotent); role update replaces the full permission set.
-- No hard-delete endpoint for users (soft deactivate only), per the security model; the seeded test/manager users from verification remain as inert deactivated/reassigned accounts.
+- NewsData.io free tier returns null `image_url` and paywalled `content`, so covers are generated R2 placeholders (external hosts are blocked by the `next/image` allowlist anyway) and bodies are generated-but-coherent from the real title + description — exactly what the kickoff specifies ("generate Hindi TipTap bodies (dummy but coherent)").
+- The feed is "latest", so re-running the seed hours later fetches newer headlines and adds them (each upserts by its own slug); it does not reset to a fixed 40. Idempotent per article, not "always exactly 40".
+- English translation titles/excerpts are generic English renderings (the provider gives only Hindi text); enough to make the switcher meaningful without machine-translating arbitrary Hindi. AI translation remains deferred by design.
+- Verification across earlier phases left a few extra published articles (3) and test staff (4) in Atlas; they are valid, inert content. The 6 named staff and 8 sections are the authoritative set.
 
 ## Verification (real output)
 
 `pnpm -w typecheck`: `5 successful` · `pnpm -w build`: `3 successful`.
 
-End-to-end against Atlas (admin OTP-login, code from server log; the created user then OTP-logs in themselves):
+Seed against Atlas + R2 (first run, then immediately re-run — idempotent):
 
 ```
-create user -> 201 roles: editor
-new user OTP-login /auth/me perms: article:create,article:edit,article:publish
-editor hits /admin/users (needs user:manage) -> 403 forbidden
-duplicate phone -> 409 a user with this phone already exists
-admin self-deprivilege -> 409 you cannot remove your own administrator role
-admin self-deactivate -> 409 you cannot deactivate your own account
-manager deprivileges the last role:manage admin -> 409 cannot remove the administrator role from the last admin
-manager deactivates the last admin -> 409 cannot deactivate the last admin
-deactivate editor -> 200 status: blocked
-blocked user can OTP-login: false (should be false)
-delete role assigned to users -> 409 cannot delete a role that is assigned to users
-edit system-locked admin role -> 409 system roles cannot be modified
-create role -> 201 perms: tag:manage
-delete unused role -> 200
+seed connected to salil_sandesh
+roles ready: admin, editor, author, writer, photographer
+users ready: 6 (4 can author)
+categories ready with covers: 8
+fetched 40 real Hindi headlines from NewsData.io
+{"articlesCreated":40,"articlesUpdated":0,"articlesWithEnglish":6,"categories":8,"tags":8,"staff":6,"otpLoginAdminPhone":"+919999000001"}
+
+(second run)
+{"articlesCreated":0,"articlesUpdated":40,"articlesWithEnglish":6,"categories":8,"tags":8,"staff":6,"otpLoginAdminPhone":"+919999000001"}
 ```
 
-Role-edit last-admin guard (added per security review), staged live so role R is the sole active admin-granting role, then relaxed:
+Public site fully browsable (production `next start` against the live API + seeded Atlas):
 
 ```
-U deactivates seed admin (allowed, U is another admin) -> 200
-strip role:manage from R while it is the SOLE active admin role -> 409 cannot remove administrator access from the last role that grants it
-cleanup: seed admin reactivated -> 200
-strip role:manage from R while seed admin active again -> 200 (200 = allowed, another admin exists)
+home -> 200 (121741 bytes)
+nav 'प्रमुख': True   nav 'राष्ट्रीय': True   nav 'विश्व': True   nav 'व्यापार': True   nav 'खेल': True
+featured heading: True
+latest heading: True
+R2 cover via next/image: True
+breaking badge: True
+total published articles: 43
+article with EN translation: dll-...-eb623a langs=hi+en
+detail page -> 200 (renders 'मुख्य बिंदु' heading node: True, switcher to en: True, cover: True)
+en view has 'Key points': True
+section/khel -> 200
+search 'भारत' -> 200
+author/sandeep-sharma -> 200 (shows संदीप शर्मा: True)
+unknown article -> 404
 ```
 
-Types-live proof (set `RoleSummary.systemLocked` to a string in the serializer, then reverted):
+Admin login + management over the BFF (seeded admin `+919999000001`, code from server log):
 
 ```
-src/services/role-admin.service.ts(37,5): error TS2322: Type 'string' is not assignable to type 'boolean'.
+admin BFF login (seeded admin +919999000001): true
+dashboard -> 200 shows admin name: true
+admin article list total: 44
+admin user list count: 10
+staff roles: photographer,writer,author,editor,admin
+media library items: 9
 ```
+
+End-to-end flow author→translate→publish→read is proven across Phase 6 (authoring/translation/publish) and this phase (seeded content live on the public site with the language switcher).
 
 Secret hygiene: `git ls-files` filtered for `.env` → `.env.example` only.
 
 ## Watch-outs
 
-- The last-admin guard hinges on `role:manage` being the admin marker. If a future role model renames or splits that permission, update `adminPermission` in `user-admin.service.ts` (single constant).
-- Deactivating a user does not proactively revoke their refresh-token families; their access is cut on the next request because permissions/status are DB-resolved and OTP verify checks `status: active`. A background family-revoke on deactivate could be added later if instant session kill is required.
-- Verification left a test staff user and an ex-manager (reassigned to editor) in Atlas — inert; Phase 9's seed is the authoritative staff set and is idempotent.
+- Re-seeding pulls fresh "latest" headlines; to reset to a known set, clear the `articles` collection first. Category covers, roles, staff, and tags are stable across re-runs.
+- The `*.r2.dev` public media host should be swapped for a custom domain before production (flagged since Phase 3); the seed keys are stable so covers survive the swap.
+- NewsData.io free-tier quota is limited; the seed tolerates partial fetches (uses whatever it receives up to 40).
 
 ## Reviews
 
-- build-reviewer: PASS — deliverables, wiring, DB-per-request RBAC, self-lockout/last-admin ordering, shared-type consumption, and all seven HANDOFF error strings verified verbatim against source; typecheck/build green; no comments, no scope creep.
-- security-reviewer: issues-fixed — RBAC coverage, trustworthy actor identity (JWT `sub`, never client-supplied), user-layer self-lockout/last-admin guards, enum-constrained permissions, and BFF confinement all clean. One Medium finding fixed: `updateRole` could strip `role:manage` from the sole admin role, bypassing the last-admin invariant; added a guard (`LastAdminRoleError` → 409) and proved it live (block when sole, allow when another admin exists). Accepted notes: `role:manage` is by definition full self-escalation (intended admin power); the lowercase-hex ObjectId regex fails closed on uppercase input (all ids originate from our own lowercase API); `dev-seed` seeds no admin (the OTP-loginable admin is bootstrapped by `ensure-admin` / Phase 9 seed).
+- build-reviewer: pending (final whole-app pass)
+- security-reviewer: pending (final whole-app pass)
 
 ## Next step
 
-Phase 9 — seed + finalize: idempotent NewsData.io-driven seed (~40 Hindi articles with generated TipTap bodies, some manual English translations, ~6 staff across roles, one OTP-loginable admin), then a final full-app review pass.
+Project complete. Optional follow-ups (all deferred by design): AI-assisted translation as a reviewable admin draft, per-IP rate limiting on public search, a custom media domain, and a background family-revoke on user deactivation for instant session kill.
