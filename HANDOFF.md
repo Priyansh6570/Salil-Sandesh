@@ -1,83 +1,74 @@
-# HANDOFF — Phase 0: Guardrails, scaffold, review agents
+# HANDOFF — Phase 1: Data models + shared types
 
 ## What I built
 
-- Git repo on `main` with origin `https://github.com/Priyansh6570/Salil-Sandesh.git`.
-- Guardrails first: `.gitignore` (`.env`, `.env.*`, `!.env.example`, build outputs, `next-env.d.ts`), committed `.env.example` with placeholders, local `.env` created with empty values (human has since filled `MONGODB_URI`).
-- pnpm + Turborepo monorepo: `apps/api` (Express + TS + Mongoose + zod env validation), `apps/web` and `apps/admin` (Next.js 14 App Router, Tailwind + shadcn token layer, `components.json` ready for shadcn CLI), `packages/shared` (type contract; exports `HealthResponse`), `packages/editor-config` (initial TipTap node/mark allow-list, finalized in Phase 5).
-- Review subagents at `.claude/agents/build-reviewer.md` and `.claude/agents/security-reviewer.md`.
-- API bootstrap: env validation throws on missing/empty required vars; Mongo connects to Atlas (`DB_NAME` from env); listens on `PORT ?? API_PORT` bound to `0.0.0.0`; `GET /health` typed as `HealthResponse` from `packages/shared`.
+- `packages/shared` now carries the full type contract: runtime catalogues (`languageCodes` with `hi` default, `userStatuses`, `articleStatuses`, `mediaKinds`, `refreshTokenStatuses`, `permissionCatalogue` of 10 permissions) plus wire types `User`, `Role`, `Article`/`ArticleTranslation`/`ArticleFlags`, `Category`, `Tag`, `Media`, `RefreshTokenRecord`, and generic `TipTapNode`/`TipTapMark`.
+- `apps/api/src/models/`: seven Mongoose schemas (`user`, `role`, `article`, `category`, `tag`, `media`, `refresh-token`) with a barrel `index.ts`. Schema enums are built FROM the shared runtime catalogues, so enum drift between API and frontends is a compile error.
+- Article schema: `translations` as a `Map` of per-language subdocuments `{ title, excerpt, slug, body (Mixed TipTap JSON) }`; map keys validated against `languageCodes`; a pre-validate hook rejects any article lacking a translation for its `defaultLanguage`; shared fields (category, author, tags, cover, flags, status, publishedAt) live on the article.
+- Uniqueness via indexes: `user.phone`, `user.slug`, `role.name`, `category.slug`, `tag.slug`, `media.key`, `refreshToken.tokenHash`; lookup indexes on `refreshToken.userId` and `familyId`.
+- Verification script `apps/api/src/scripts/model-roundtrip.ts`: creates one of each document against Atlas, reads the article back, asserts four validation rejections, cleans up after itself. Hardened per security review: a negative check that unexpectedly succeeds now deletes the stray document and exits non-zero, and cleanup runs in a `finally` so midway crashes don't leak test documents.
 
 ## Decisions & deviations
 
-- Internal packages export TypeScript source directly (`exports` → `src/index.ts`); Next apps use `transpilePackages`, the API bundles them via tsup (`noExternal`). No per-package build step needed.
-- `next-env.d.ts` is gitignored because Next regenerates it with comments (project rule: no comments anywhere). It is recreated by any `next dev`/`next build`; run a build once after a fresh clone before bare `tsc`.
-- Env schema currently requires only what Phase 0 consumes (`MONGODB_URI`, `DB_NAME`); later phases add their vars as they consume them (annotate-as-you-consume). JWT/OTP/R2 values are still blank in `.env` — needed from Phase 2 onward.
-- `pnpm-workspace.yaml` approves build scripts for `esbuild` and `sharp` only (pnpm 10 blocks postinstall by default).
+- Language codes are a curated const list (`hi en bn gu mr pa ta te ur`) rather than free strings — adding a language is a one-line shared change; keeps editor tabs, fallback logic, and map-key validation typed.
+- `RefreshToken` got `tokenHash` and `expiresAt` beyond the spec's minimum ("user, family id, rotated/active state") because rotation in Phase 2 is impossible without them; nothing else was added ahead of need.
+- Doc→wire field parity (ObjectId→string, Date→ISO) locks in when Phase 3 serializers return shared types from documents; today the shared runtime catalogues are the enforced drift guard (proven below).
 
 ## Verification (real output)
 
-`pnpm -w typecheck`:
+`pnpm -w typecheck`: `Tasks: 5 successful, 5 total` · `pnpm -w build`: `Tasks: 3 successful, 3 total, Time: 15.147s`.
+
+Round-trip against Atlas (`tsx src/scripts/model-roundtrip.ts`, re-run after hardening):
 
 ```
- Tasks:    5 successful, 5 total
-Cached:    0 cached, 5 total
-  Time:    3.386s
+roundtrip connected to salil_sandesh
+{
+  "articleId": "6a4b9a791ed61e0ccafdcbc8",
+  "defaultLanguage": "hi",
+  "translationLanguages": [
+    "hi",
+    "en"
+  ],
+  "hindiTitle": "जल संरक्षण पर विशेष रिपोर्ट",
+  "englishTitle": "Special report on water conservation",
+  "bodyNodeType": "doc",
+  "status": "draft",
+  "isBreaking": true,
+  "categoryId": "6a4b9a791ed61e0ccafdcbc2",
+  "authorId": "6a4b9a791ed61e0ccafdcbbd",
+  "tagIds": [
+    "6a4b9a791ed61e0ccafdcbc4"
+  ],
+  "coverMediaId": "6a4b9a791ed61e0ccafdcbc6",
+  "refreshTokenStatus": "active"
+}
+article with unsupported language key: rejected -> Article validation failed: translations: translations must be non-empty and keyed by supported language codes
+article missing default-language translation: rejected -> missing translation for default language hi
+role with unknown permission: rejected -> Role validation failed: permissions.0: `article:fly` is not a valid enum value for path `permissions.0`.
+user with invalid status: rejected -> User validation failed: status: `asleep` is not a valid enum value for path `status`.
+roundtrip cleanup complete (7 documents removed)
 ```
 
-`pnpm -w build` (tsup + two Next production builds):
+Types-live proof (changed the user schema default to `"activee" satisfies UserStatus`, then reverted):
 
 ```
-@salil-sandesh/api:build: ESM dist\server.js 1.72 KB
-@salil-sandesh/web:build:  ✓ Generating static pages (4/4)
-@salil-sandesh/admin:build:  ✓ Generating static pages (4/4)
- Tasks:    3 successful, 3 total
+src/models/user.model.ts(13,26): error TS1360: Type '"activee"' does not satisfy the expected type '"active" | "blocked"'.
 ```
 
-Real boot against Atlas (`tsx src/server.ts`):
-
-```
-connected to mongodb database salil_sandesh
-api listening on 0.0.0.0:4000
-```
-
-`GET http://localhost:4000/health`:
-
-```
-StatusCode : 200
-Content    : {"ok":true}
-```
-
-Fail-fast env validation (booted with `MONGODB_URI=` empty):
-
-```
-Error: Environment validation failed: MONGODB_URI: String must contain at least 1 character(s)
-exit code: 1
-```
-
-Types-live proof (changed `res.json({ ok: true })` to `{ ok: "yes" }`, then reverted):
-
-```
-src/controllers/health.controller.ts(5,14): error TS2322: Type 'string' is not assignable to type 'boolean'.
-```
-
-Secret hygiene (`git ls-files` filtered for `.env`):
-
-```
-.env.example
-```
+Secret hygiene: `git ls-files` filtered for `.env` → `.env.example` only.
 
 ## Watch-outs
 
-- `.env` still has blank `JWT_ACCESS_SECRET`, `ADMIN_SESSION_SECRET`, `SECRETS_ENC_KEY`, `NEWS_API_KEY`, and all `R2_*` values. Phase 2 needs the three generated secrets; Phase 7 needs R2; Phase 9 needs the NewsData key.
-- `REDIS_URL` is blank — OTP/rate-limit state will use the Mongo/in-memory fallback path when built.
-- Turbo remote caching is off; all runs are local.
+- `translations` map slugs are not globally unique at the schema level (dynamic keys can't carry a Mongo unique index); per-language slug uniqueness gets enforced in the article service when writes are built (Phase 6), and slug lookup indexes (`translations.hi.slug` etc.) get added in Phase 3 with the read paths.
+- `body` is `Schema.Types.Mixed` — deep-change tracking requires `markModified("translations")` on nested body edits; editor-config validation of body content arrives with the write path (Phase 6).
+- Blank `.env` values still pending for Phase 2: `JWT_ACCESS_SECRET`, `ADMIN_SESSION_SECRET`, `SECRETS_ENC_KEY`.
+- Phase 2 note from security review: any TTL index on refresh tokens must key off `expiresAt` only — `rotated`/`revoked` records must survive long enough for family reuse detection.
 
 ## Reviews
 
-- build-reviewer: issues-fixed — all deliverables, verification authenticity, shared-type consumption, and the no-comments rule verified against uncached typecheck/build runs; sole defect was that the phase had not yet been committed/pushed, resolved by this commit.
-- security-reviewer: issues-fixed — secrets hygiene, fail-fast env validation, and Express bootstrap all clean; low-severity finding (local `.claude/scheduled_tasks.lock` would have been committed) fixed by ignoring `.claude/*` except `.claude/agents/`.
+- build-reviewer: issues-fixed — all deliverables, drift guard, index set, and verification authenticity confirmed (roundtrip ObjectIds and validator strings cross-checked against sources; types-live line/col reproduced empirically). Two minor defects fixed: `media.alt` had contradictory `required: true` + `default: ""` (required dropped — alt may be empty); round-trip paste in this handoff corrected to verbatim multi-line JSON output.
+- security-reviewer: issues-fixed — secrets hygiene clean, refresh tokens stored as `tokenHash` only, permissions/status/language enums closed. Low finding fixed: the round-trip's negative checks now exit non-zero (and delete the stray doc) if a validator regresses, and cleanup runs in `finally`. TTL advisory recorded in Watch-outs.
 
 ## Next step
 
-Phase 1 — Mongoose models (User, Role, Article with `translations` map, Category, Tag, Media, RefreshToken) plus matching types in `packages/shared`, with a schema-level round-trip against Atlas.
+Phase 2 — OTP auth (log-delivered codes, no-enumeration, per-phone + per-IP rate limits), access JWT + rotating refresh with family reuse detection, DB-resolved permission middleware, `GET /auth/me`.
