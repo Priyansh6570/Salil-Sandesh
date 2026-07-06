@@ -1,83 +1,87 @@
-# HANDOFF — Phase 4: Public website (`apps/web`)
+# HANDOFF — Phase 5: Admin CMS foundation (`apps/admin`)
 
 ## What I built
 
-- **Shell** (`app/layout.tsx`): masthead with the brand from `GET /site` (nothing hardcoded), category nav from `GET /categories`, search form, footer with static-page links. App renders dynamically (`force-dynamic`) with per-fetch `revalidate` caching, so builds never require a running API.
-- **Typed API client** (`lib/api.ts`): every call returns shared types (`SiteConfig`, `Category`, `Tag`, `Paginated<ArticleCard>`, `ArticleDetail`, `AuthorPublic`); 404s map to `null` → `notFound()`.
-- **Home** (`app/page.tsx`): featured (`?featured=true`), latest, and per-category sections, all honouring `?lang=`.
-- **Article page** (`app/article/[slug]`): typed TipTap renderer + **language switcher** listing `availableLanguages` (current highlighted, links via `?lang=`), cover via `next/image`, byline/date (locale-aware `Intl` formatting), tag links, metadata from the translation.
-- **Typed renderer** (`components/article-body.tsx`): recursive walker over `TipTapNode`. Node and mark renderers are `Record<AllowedNode, …>` / `Record<AllowedMark, …>` built from `@salil-sandesh/editor-config`, so **renderer↔editor-config parity is enforced at typecheck** (removing a renderer is a compile error — proven below). Unknown node/mark → visible "असमर्थित सामग्री" chip, never a silent drop. No `dangerouslySetInnerHTML` anywhere. Link marks render only after protocol sanitization (http/https, else plain text).
-- **Section / author / tag / search pages** with pagination (prev/next preserving `lang`/`q`), graceful empty states; search is server-rendered from `?q=` (uncached), form GET keeps URLs shareable.
-- **Static pages**: about, contact, privacy, terms (Hindi), plus a Hindi `not-found` page.
-- **Images**: `next/image` `remotePatterns` built in `next.config.mjs` from `MEDIA_PUBLIC_BASE_URL` (loaded from the root `.env`) — protocol + exact hostname + path prefix, **no wildcard host**; empty allowlist if the var is absent (fail closed).
-- **i18n** (`lib/i18n.ts`): UI dictionary with `hi` default and `en`, `getDictionary` falls back to Hindi for any other code; `languageNames` in native script for the switcher; `parseLang` validates `?lang=` against shared `languageCodes`.
-- shadcn/ui primitives (button, card, badge, input, separator) hand-written to the new-york style under `components/ui/` (CLI generation avoided to keep the no-comments rule); all styling through the shadcn token layer.
+- **BFF session**: the browser holds ONLY a first-party httpOnly cookie `ss_admin_session` containing the token pair sealed with **AES-256-GCM** (`lib/crypto.ts`, key = SHA-256 of `ADMIN_SESSION_SECRET`, versioned `v1.` format, IV+tag validated on unseal). Tokens never appear in browser JS, responses, `localStorage`, or `sessionStorage`. Cookie: `HttpOnly`, `SameSite=Lax`, `Path=/`, `Secure` in production, 30-day max-age.
+- **Auth route handlers** (`app/api/auth/*` — the only places cookies are written):
+  - `request-otp` / `verify`: zod-validated proxies to the API's OTP endpoints; `verify` seals the token pair into the cookie and returns only `{ ok: true }`.
+  - `refresh` (GET with sanitized `next` path — rejects `//` and absolute URLs): rotates the refresh token against the API and reseals the cookie — **rotation happens only here, never in RSC render** (RSC cannot write cookies; `requireUser` redirects expiring sessions to this handler).
+  - `logout`: revokes the token family at the API and clears the cookie.
+- **Session plumbing** (`lib/`): `session.ts` (read/write/clear sealed cookie), `jwt.ts` (decode-only expiry check, no verification — the API is the verifier), `api-proxy.ts` (server-side fetches to the API, `cache: no-store`), `require-user.ts` (RSC guard: no session → `/login`; expiring/rejected access token → refresh handler → back).
+- **Login page** (`/login`): two-step phone→code client form using **TanStack Query** mutations against the BFF handlers (introduced here with the first real client mutations, per the Phase 4 deferral note); OTP code still comes from the API server log.
+- **Permission-gated shell** (`app/(dashboard)/layout.tsx`): sidebar nav built from `lib/nav.ts` where each item declares its required permissions (typed `Permission[]` — mistyping one is a compile error); items render only when `GET /auth/me` (DB-resolved, per request) grants them. Dashboard page lists the resolved permissions. UI gating is UX only — the API's `requirePermissions` middleware remains the enforcement point for every future mutation.
+- **`packages/editor-config` finalized** for text authoring: 10 nodes (doc, paragraph, text, heading, bulletList, orderedList, listItem, blockquote, horizontalRule, hardBreak) + 3 marks (bold, italic, link). The web renderer's compile-time parity (Phase 4 proof) covers exactly this set. The `image` node deliberately enters in Phase 7 with the media pipeline, where the parity guard will force renderer coverage in the same change.
+- Admin app hardening: same security headers as web, root-`.env` loading in `next.config.mjs`, `ADMIN_SESSION_SECRET` required at first use (throws if missing).
 
 ## Decisions & deviations
 
-- **TanStack Query deferred**: with search server-rendered there is zero client-side data fetching in the public site, so adding the QueryClient would be dead weight (and cross-origin fetches to the API would additionally need CORS). It enters with the admin app where real client mutations exist. Deviation from the stack line in CLAUDE.md §3, declared here deliberately.
-- `force-dynamic` on the root layout: a news site's pages should not be frozen at build time; per-fetch `revalidate` (60s articles, 300s config/taxonomy) provides the caching layer instead.
-- `API_URL` (server-side, non-secret) defaults to `http://localhost:4000`; set it in the deploy environment.
+- `SECRETS_ENC_KEY` remains unused (reserved; NewsCore inheritance) — the BFF seal uses `ADMIN_SESSION_SECRET` only.
+- Refresh-via-GET redirect handler: state-changing but only rotates the caller's own session and never returns token material; `SameSite=Lax` + same-origin JSON POSTs cover the CSRF surface for the mutating handlers.
+- Production verification note: under `next start`, the cookie carries `Secure` and the PowerShell client (correctly) refused it over plain http — that behavior is the Secure-flag proof; the functional flow below therefore ran on `next dev` (NODE_ENV=development) against the real API + Atlas.
 
 ## Verification (real output)
 
-`pnpm -w typecheck`: `5 successful` · `pnpm -w build`: `3 successful` (web build no longer touches the API).
+`pnpm -w typecheck`: `5 successful` · `pnpm -w build`: `3 successful` (admin build lists all four `/api/auth/*` as dynamic routes, `/login` static).
 
-Real pages served by `next start` against the live API + Atlas seed:
-
-```
-home -> 200 (30284 bytes)
-article-hi -> 200 (20258 bytes)
-article-en -> 200 (20079 bytes)
-section -> 200 (13388 bytes)
-author -> 200 (18787 bytes)
-tag -> 200 (15325 bytes)
-search -> 200 (17529 bytes)
-about -> 200 (11097 bytes)
-unknown-article -> 404
-```
-
-Content assertions on the served HTML:
+Full BFF login (OTP from the API server log), cookie inspection, admin shell:
 
 ```
-hi page has Hindi title: True
-hi page has switcher link to en: True
-hi page renders heading node: True
-hi page renders blockquote: True
-hi page renders list item: True
-en page has English title: True
-en page has English body: True
-en page switcher marks hi available: True
-hi page uses next/image for cover: True
-home has featured section: True
-home has latest section: True
-home has breaking badge: True
-home shows cricket article: True
-home nav has categories: True
-search shows result: True
-empty search graceful: True
-tag page shows tagged article: True
+verify -> 200 {"ok":true}
+cookie flags: httponly=True samesite-lax=True sealed-v1=True raw-jwt-leak=False
+dashboard -> 200
+shell shows name: True
+shell has users nav: True
+shell has roles nav: True
+shell has articles nav: True
+dashboard shows resolved permission: True
 ```
 
-Renderer↔editor-config parity proof (removed the `hardBreak` renderer, then reverted):
+Restricted role sees less (editor: article:create/edit/publish only):
 
 ```
-components/article-body.tsx(84,7): error TS2741: Property 'hardBreak' is missing in type '{ doc: ...; }' but required in type 'Record<"blockquote" | "text" | "doc" | "paragraph" | "heading" | "bulletList" | "orderedList" | "listItem" | "horizontalRule" | "hardBreak", ...>'.
+editor dashboard -> 200
+editor sees name: True
+editor sees articles nav: True
+editor sees users nav: False
+editor sees roles nav: False
+editor sees media nav: False
 ```
 
-Safety greps: `dangerouslySetInnerHTML|localStorage|sessionStorage` across `apps/web` → no matches. `git ls-files` filtered for `.env` → `.env.example` only.
+Server-side rotation via the route handler, then logout:
+
+```
+rotation changed sealed cookie: True
+session valid after rotation: True
+after logout / -> 307 (redirect to login)
+```
+
+Auth guard and rate-limit passthrough:
+
+```
+unauthenticated / -> 307 location=/login
+login page -> 200
+(3rd OTP request in window) -> 429 propagated by the BFF
+```
+
+Types-live proof (mistyped a nav permission, then reverted):
+
+```
+lib/nav.ts(16,46): error TS2820: Type '"media:uplod"' is not assignable to type '"article:create" | ... | "role:manage"'. Did you mean '"media:upload"'?
+```
+
+Secret hygiene: `git ls-files` filtered for `.env` → `.env.example` only. Grep for `localStorage|sessionStorage|document.cookie` in `apps/admin` → no matches.
 
 ## Watch-outs
 
-- The seed's cover key has no real object in R2 yet, so the cover image request 404s at the media origin (the page and `next/image` markup are correct; Phase 7/9 put real objects behind the keys).
-- Home fetches per-category sections for the first 4 categories (2 exist today); with many categories revisit the fan-out.
-- UI dictionary covers `hi`/`en`; other languages fall back to Hindi UI copy while article content still renders in the requested language.
+- `requireUser` runs `/auth/me` per RSC render — acceptable now; consider request-level memoization when the shell grows.
+- The refresh handler redirects to `/login` on any rotation failure (including a reused token → family revoked at the API); users mid-session on a revoked family get a clean re-login, not an error page.
+- Dev server was used for the cookie-flow verification (see decision note); reviewers re-running it need the API up (`tsx src/server.ts`) and a fresh OTP window (per-phone limit 3/5min).
 
 ## Reviews
 
-- build-reviewer: PASS — deliverables wired end to end (client paths cross-checked against actual API routes), renderer parity proof reproduced independently in a scratch compile, no comments, no dead TanStack dependency behind the declared deferral, content assertions consistent with dictionary and seed sources.
-- security-reviewer: issues-fixed — XSS surfaces clean (React text nodes only, `safeHref` rejects `javascript:`/`data:`, heading tag clamped to h1–h6), image allowlist exact-host and fail-closed, no token storage, all user input into the API client encoded/validated. Two low/info items applied: baseline security headers (nosniff, referrer-policy, frame deny, permissions-policy) added to `next.config.mjs`, and `parsePage` hoisted into `lib/i18n.ts` to remove four duplicated copies. Deferred with note: full CSP at the deployment phase.
+- build-reviewer: PASS — deliverables verified against uncached runs (route table matches, cookie writes confined to route handlers by grep, TanStack dependency real, nav labels and types-live line/col character-exact, editor-config unchanged with web parity intact).
+- security-reviewer: issues-fixed — BFF token confinement, AES-GCM implementation (fresh IV, tamper→null, length guards), cookie flags, CSRF posture, and input validation all clean. One medium finding (both reviewers converged on it independently): the refresh handler's `next` sanitizer allowed backslash-authority payloads (`/\evil.com` → WHATWG normalizes `\` to `/` → open redirect after rotation). Fixed with `/^\/(?![/\\])/` and proven with a Node repro: `/\evil.com`, `//evil.com`, `/\/evil.com`, and absolute URLs all now resolve to `/`, while `/articles?x=1` passes through.
 
 ## Next step
 
-Phase 5 — admin CMS foundation (`apps/admin`): BFF session (httpOnly AES-GCM cookie, server-side refresh rotation via route handlers), phone-OTP login, permission-gated shell/nav, finalize `packages/editor-config`.
+Phase 6 — article CRUD + TipTap editor built FROM editor-config + multilingual authoring tabs; server-side body validation against editor-config on write.
